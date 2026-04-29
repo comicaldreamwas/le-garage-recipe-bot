@@ -10,17 +10,13 @@ const { formatRecipe } = require('./lib/openai');
 const { sendRecipe } = require('./lib/telegram');
 
 // ── Validate env ─────────────────────────────────────────────────────────────
-const required = ['TELEGRAM_BOT_TOKEN', 'NOTION_TOKEN', 'OPENAI_API_KEY', 'ALLOWED_USER_IDS'];
+const required = ['TELEGRAM_BOT_TOKEN', 'NOTION_TOKEN', 'OPENAI_API_KEY'];
 for (const key of required) {
   if (!process.env[key]) {
     console.error(`❌ Missing env variable: ${key}`);
     process.exit(1);
   }
 }
-
-const ALLOWED_IDS = new Set(
-  process.env.ALLOWED_USER_IDS.split(',').map((id) => parseInt(id.trim(), 10))
-);
 
 // ── Load cache (hot-reload on file change) ────────────────────────────────────
 let cache = loadCache();
@@ -33,18 +29,6 @@ watchCache((fresh) => {
 
 // ── Bot setup ─────────────────────────────────────────────────────────────────
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
-
-// ── Whitelist middleware ───────────────────────────────────────────────────────
-bot.use(async (ctx, next) => {
-  const userId = ctx.from?.id;
-  if (!userId || !ALLOWED_IDS.has(userId)) {
-    await ctx.reply(
-      "Sorry, you're not authorized to use this bot.\nContact the restaurant manager for access."
-    );
-    return;
-  }
-  return next();
-});
 
 // ── /start command ────────────────────────────────────────────────────────────
 bot.start(async (ctx) => {
@@ -183,7 +167,6 @@ bot.launch()
   .then(() => {
     const botInfo = bot.botInfo;
     console.log(`\n✅ Bot is running on @${botInfo?.username || 'unknown'}`);
-    console.log(`   Allowed users: ${[...ALLOWED_IDS].join(', ')}`);
     console.log(`   Cache: ${Object.keys(cache.recipes).length} recipes\n`);
   })
   .catch((err) => {
