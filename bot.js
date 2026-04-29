@@ -163,16 +163,21 @@ async function editOrReply(ctx, statusMsg, text) {
 }
 
 // ── Launch ────────────────────────────────────────────────────────────────────
-bot.launch()
-  .then(() => {
-    const botInfo = bot.botInfo;
-    console.log(`\n✅ Bot is running on @${botInfo?.username || 'unknown'}`);
+// In Telegraf v4, bot.launch() resolves only when the bot STOPS — log startup separately
+bot.telegram.getMe()
+  .then((info) => {
+    console.log(`\n✅ Bot is running on @${info.username}`);
     console.log(`   Cache: ${Object.keys(cache.recipes).length} recipes\n`);
   })
   .catch((err) => {
-    console.error('💥 Failed to start bot:', err.message);
+    console.error('💥 Failed to connect to Telegram:', err.message);
     process.exit(1);
   });
+
+bot.launch().catch((err) => {
+  console.error('💥 Fatal error:', err.message);
+  process.exit(1);
+});
 
 // Graceful shutdown
 process.once('SIGINT', () => bot.stop('SIGINT'));
