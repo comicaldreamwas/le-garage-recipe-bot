@@ -1,0 +1,20 @@
+{
+  "name": "le-garage-recipe-bot",
+  "version": "1.0.0",
+  "description": "Telegram recipe bot for Le Garage restaurant kitchen",
+  "main": "bot.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node bot.js",
+    "build-cache": "node cache-builder.js"
+  },
+  "dependencies": {
+    "@notionhq/client": "^2.2.15",
+    "dotenv": "^16.4.5",
+    "openai": "^4.67.3",
+    "telegraf": "^4.16.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
