@@ -60,7 +60,8 @@ async function main() {
   console.log(`✅ Found ${pages.length} pages in Notion\n`);
 
   // Build the recipes_text string (used by bot for AI search)
-  cache.recipes_text = pages.map((p) => `${p.url} = ${p.id}`).join('\n');
+  // Use short slug instead of full URL to stay within Groq token limits
+  cache.recipes_text = pages.map((p) => `${nameFromUrl(p.url)} = ${p.id}`).join('\n');
 
   // ── Process each recipe ───────────────────────────────────────────────────
   let processed = 0;
