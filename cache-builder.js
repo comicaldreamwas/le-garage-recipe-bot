@@ -59,9 +59,17 @@ async function main() {
   const pages = await fetchAllRecipes();
   console.log(`✅ Found ${pages.length} pages in Notion\n`);
 
-  // Build the recipes_text string (used by bot for AI search)
-  // Use short slug instead of full URL to stay within Groq token limits
-  cache.recipes_text = pages.map((p) => `${nameFromUrl(p.url)} = ${p.id}`).join('\n');
+  // Build deduplicated recipes_text (slug = id) for AI search
+  // Dedup by slug name to stay within Groq free tier token limits (~6k TPM)
+  const seenSlugs = new Set();
+  const uniquePages = pages.filter(p => {
+    const slug = nameFromUrl(p.url);
+    if (!slug || seenSlugs.has(slug)) return false;
+    seenSlugs.add(slug);
+    return true;
+  });
+  cache.recipes_text = uniquePages.map((p) => `${nameFromUrl(p.url)} = ${p.id}`).join('\n');
+  console.log(`📋 recipes_text: ${uniquePages.length} unique recipes (from ${pages.length} total pages)`);
 
   // ── Process each recipe ───────────────────────────────────────────────────
   let processed = 0;
