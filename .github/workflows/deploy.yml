@@ -2,15 +2,13 @@ name: Deploy to VPS
 
 on:
   push:
-    branches: [main]
+    branches: [master]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
-
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -18,8 +16,8 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            cd /path/to/le-garage-recipe-bot
-            git pull origin main
+            cd /opt/le-garage-recipe-bot
+            git pull origin master
             npm install --omit=dev
             pm2 restart recipe-bot
             echo "✅ Deploy complete"
