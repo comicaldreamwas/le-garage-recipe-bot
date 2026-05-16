@@ -5,7 +5,7 @@ require('dotenv').config();
 const { Telegraf } = require('telegraf');
 const { loadCache, watchCache } = require('./lib/cache');
 const { searchRecipe, suggestRecipes } = require('./lib/search');
-const { formatRecipe, formatSuggestions, NOT_FOUND_MESSAGE } = require('./lib/format');
+const { formatRecipe, formatSuggestions, formatBrokenReport, NOT_FOUND_MESSAGE } = require('./lib/format');
 const { sendRecipe } = require('./lib/telegram');
 
 // ── Validate env ─────────────────────────────────────────────────────────────
@@ -60,9 +60,36 @@ bot.help(async (ctx) => {
     '📖 *How to use*\n\n' +
     'Just type the dish name — no commands needed.\n' +
     'Typos are OK; the bot will try to figure it out.\n\n' +
-    '*Languages:* 🇬🇧 English · 🇪🇬 العربية',
+    '*Languages:* 🇬🇧 English · 🇪🇬 العربية\n\n' +
+    '*Admin commands:*\n' +
+    '`/broken` — list recipes that need fixing in Notion',
     { parse_mode: 'Markdown' }
   );
+});
+
+// /broken — list every incomplete recipe with what's missing and a
+// Notion link to edit. Whitelisted users only.
+bot.command('broken', async (ctx) => {
+  if (!isAllowed(ctx.from.id)) {
+    await ctx.reply('🚫 Not authorized.');
+    return;
+  }
+  const messages = formatBrokenReport(cache.recipes);
+  for (const m of messages) {
+    await ctx.reply(m, { parse_mode: 'Markdown', disable_web_page_preview: true });
+  }
+});
+
+// Alias
+bot.command('incomplete', async (ctx) => {
+  if (!isAllowed(ctx.from.id)) {
+    await ctx.reply('🚫 Not authorized.');
+    return;
+  }
+  const messages = formatBrokenReport(cache.recipes);
+  for (const m of messages) {
+    await ctx.reply(m, { parse_mode: 'Markdown', disable_web_page_preview: true });
+  }
 });
 
 bot.on('text', async (ctx) => {
