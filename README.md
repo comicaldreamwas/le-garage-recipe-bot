@@ -77,7 +77,7 @@ Fill in `.env`:
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | From @BotFather |
 | `NOTION_TOKEN` | Notion integration token (`ntn_...`) |
-| `NOTION_PARENT_ID` | Parent page that scopes which recipes are loaded. Default = Le Garage Menu Cairo. |
+| `NOTION_DATABASE_IDS` | Comma-separated database IDs whose rows are treated as recipes. Default = Le Garage Cairo + El Gouna. |
 | `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs. Empty = open access. |
 
 To find your Telegram user ID, message [@userinfobot](https://t.me/userinfobot).
@@ -102,15 +102,24 @@ You should see `✅ Bot is running on @YourBotName`.
 
 ## Multi-restaurant Notion setup
 
-This Notion integration can be shared by multiple restaurant workspaces.
-The bot filters recipe pages by parent: only pages that descend from
-`NOTION_PARENT_ID` end up in the cache. Default is **Le Garage Menu Cairo**
-(`24e30eca-90bc-80de-8c59-e3c7db23fb60`).
+The Notion integration token can have access to multiple restaurant
+databases. Recipes are stored as rows inside Notion databases, one
+database per restaurant location:
 
-To point the bot at a different restaurant, change `NOTION_PARENT_ID` in
-`.env` and re-run `node cache-builder.js`. Without this filter, recipes
-with the same name (e.g. "Mushroom Sauce") in different restaurants
-would conflict.
+| Database | ID |
+|---|---|
+| Le Garage Menu Cairo | `2ad2c25e-cb5d-8134-b661-e0323e39fb72` |
+| Le Garage El Gouna   | `2ad2c25e-cb5d-8149-8303-f983d1aebced` |
+| Boho Cafe menu       | `2ad2c25e-cb5d-812a-bc52-f3eb7111add6` |
+
+`NOTION_DATABASE_IDS` (comma-separated) controls which databases the
+bot scans. Default = both Le Garage locations. Without this filter,
+"Mushroom Sauce" in Le Garage would collide with "Mushroom Sauce" in
+Boho.
+
+To run a Boho-only bot in the future, set
+`NOTION_DATABASE_IDS=2ad2c25e-cb5d-812a-bc52-f3eb7111add6` and rebuild
+the cache.
 
 ---
 
