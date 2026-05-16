@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { fetchAllRecipes, fetchPageBlocks } = require('./lib/notion');
-const { parseRecipe, missingFields, isEmpty, isComplete } = require('./lib/parser');
+const { parseRecipe, missingFields, missingCritical, isEmpty, isComplete, isReady, isUsable } = require('./lib/parser');
 const { loadCache, saveCache } = require('./lib/cache');
 
 const CACHE_STALE_DAYS = 7;
@@ -136,11 +136,19 @@ async function main() {
       if (isEmpty(stored)) {
         console.log(`${progress} ⚠️  ${slugLabel} — empty (only title)`);
         emptyCount++;
-      } else if (isComplete(stored)) {
-        console.log(`${progress} ✅ ${stored.name}`);
+      } else if (isReady(stored)) {
+        // Has ingredients in BOTH languages — the only thing the
+        // kitchen actually needs. prep / photo / video are bonuses.
+        const extra = [];
+        if (!stored.prep_en) extra.push('prep_en');
+        if (!stored.prep_ar) extra.push('prep_ar');
+        if (!stored.photo_block_id) extra.push('photo');
+        if (!stored.video_block_id) extra.push('video');
+        const tag = extra.length ? ` (no ${extra.join(', ')})` : '';
+        console.log(`${progress} ✅ ${stored.name}${tag}`);
         completeCount++;
       } else {
-        const miss = missingFields(stored).join(', ');
+        const miss = missingCritical(stored).join(', ');
         console.log(`${progress} ⚠️  ${stored.name} — missing: ${miss}`);
         incompleteCount++;
       }
@@ -173,11 +181,14 @@ async function main() {
 }
 
 function writeReport(processed) {
+  // Critical list = empty pages + pages missing one or both ingredient
+  // languages. Other gaps (prep/photo/video) are nice-to-have and not
+  // included in the punch list.
   const broken = processed
-    .filter((r) => !isComplete(r))
-    .map((r) => ({ recipe: r, miss: isEmpty(r) ? ['ALL FIELDS'] : missingFields(r) }));
+    .filter((r) => isEmpty(r) || missingCritical(r).length)
+    .map((r) => ({ recipe: r, miss: isEmpty(r) ? ['ALL FIELDS'] : missingCritical(r) }));
 
-  const lines = ['=== INCOMPLETE RECIPES ===', `Generated: ${new Date().toISOString()}`, ''];
+  const lines = ['=== RECIPES MISSING INGREDIENTS ===', `Generated: ${new Date().toISOString()}`, ''];
   for (const { recipe, miss } of broken) {
     lines.push(recipe.name || '(no name)');
     lines.push(`URL: ${recipe.url}`);
@@ -196,27 +207,38 @@ function printReport({ total, complete, incomplete, empty, skipped, failed, cach
   const counts = countMissing(processed);
   const pct = (n) => total ? Math.round((n / total) * 100) : 0;
 
+  // "Ready" = both ingredient languages present. The bot's actual
+  // success metric — prep/photo/video are optional.
+  const readyCount = processed.filter((r) => isReady(r)).length;
+  const usableOnlyOne = processed.filter((r) => isUsable(r) && !isReady(r)).length;
+  const missingAllIng = processed.filter((r) => !isUsable(r) && !isEmpty(r)).length;
+
   console.log('\n═══════════════════════════════════');
   console.log('📊 CACHE BUILD REPORT');
   console.log('═══════════════════════════════════');
-  console.log(`Total recipes  : ${total}`);
-  console.log(`✅ Complete    : ${complete} (${pct(complete)}%)`);
-  console.log(`⚠️  Incomplete  : ${incomplete} (${pct(incomplete)}%)`);
-  console.log(`⚠️  Empty       : ${empty} (${pct(empty)}%)`);
-  console.log(`⏭  Skipped     : ${skipped}`);
-  console.log(`❌ Failed      : ${failed}`);
-  console.log(`📦 Cache total : ${cacheSize}`);
+  console.log(`Total recipes        : ${total}`);
+  console.log(`🍳 Ready (EN+AR ing) : ${readyCount} (${pct(readyCount)}%)`);
+  console.log(`🟡 One language only : ${usableOnlyOne} (${pct(usableOnlyOne)}%)`);
+  console.log(`🔴 Missing ingredients: ${missingAllIng} (${pct(missingAllIng)}%)`);
+  console.log(`⚠️  Empty (title only): ${empty} (${pct(empty)}%)`);
+  console.log(`⏭  Skipped           : ${skipped}`);
+  console.log(`❌ Failed            : ${failed}`);
+  console.log(`📦 Cache total       : ${cacheSize}`);
 
-  if (incomplete + empty > 0) {
-    console.log('\nPROBLEMS TO FIX IN NOTION:');
+  if (counts.ingredients_en || counts.ingredients_ar || counts.allEmpty) {
+    console.log('\n🔴 CRITICAL — ingredients to add in Notion:');
     if (counts.ingredients_en) console.log(`  - ${counts.ingredients_en} recipes missing ingredients_en`);
     if (counts.ingredients_ar) console.log(`  - ${counts.ingredients_ar} recipes missing ingredients_ar`);
-    if (counts.prep_en)        console.log(`  - ${counts.prep_en} recipes missing prep_en`);
-    if (counts.prep_ar)        console.log(`  - ${counts.prep_ar} recipes missing prep_ar`);
-    if (counts.photo)          console.log(`  - ${counts.photo} recipes missing photo`);
-    if (counts.video)          console.log(`  - ${counts.video} recipes missing video`);
     if (counts.allEmpty)       console.log(`  - ${counts.allEmpty} recipes are completely empty`);
     console.log(`\nSee ${REPORT_PATH} for full list with Notion URLs`);
+  }
+
+  if (counts.prep_en || counts.prep_ar || counts.photo || counts.video) {
+    console.log('\n🟢 Nice-to-have gaps (not blocking):');
+    if (counts.prep_en) console.log(`  - ${counts.prep_en} recipes missing prep_en`);
+    if (counts.prep_ar) console.log(`  - ${counts.prep_ar} recipes missing prep_ar`);
+    if (counts.photo)   console.log(`  - ${counts.photo} recipes missing photo`);
+    if (counts.video)   console.log(`  - ${counts.video} recipes missing video`);
   }
 
   // Format breakdown — which Notion layout each recipe used.
