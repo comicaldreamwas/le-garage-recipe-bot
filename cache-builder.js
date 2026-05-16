@@ -2,8 +2,8 @@
 
 require('dotenv').config();
 
-const { fetchAllRecipes, fetchPageBlocks, blocksToText } = require('./lib/notion');
-const { formatRecipe } = require('./lib/openai');
+const { fetchAllRecipes, fetchPageBlocks } = require('./lib/notion');
+const { parseRecipe } = require('./lib/parser');
 const { loadCache, saveCache } = require('./lib/cache');
 
 const CACHE_STALE_DAYS = 7;
@@ -13,142 +13,94 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * Check if a cached recipe entry is still fresh (< CACHE_STALE_DAYS old).
- */
 function isFresh(recipe) {
-  if (!recipe?.formatted_text || !recipe?.cached_at) return false;
+  if (!recipe?.cached_at) return false;
   const age = Date.now() - new Date(recipe.cached_at).getTime();
   return age < CACHE_STALE_DAYS * 24 * 60 * 60 * 1000;
-}
-
-/**
- * Extract a human-readable name from a Notion page URL.
- * e.g. "https://www.notion.so/CHICKEN-ALFREDO-abc123" → "CHICKEN-ALFREDO"
- */
-function nameFromUrl(url) {
-  try {
-    const parts = new URL(url).pathname.split('/').filter(Boolean);
-    const slug = parts[parts.length - 1] || '';
-    // Remove trailing UUID (last 32 hex chars)
-    return slug.replace(/-?[0-9a-f]{32}$/i, '') || slug;
-  } catch {
-    return url;
-  }
 }
 
 async function main() {
   console.log('🚀 Cache builder starting...\n');
 
-  // ── Validate env ──────────────────────────────────────────────────────────
-  const required = ['NOTION_TOKEN', 'OPENAI_API_KEY'];
-  for (const key of required) {
-    if (!process.env[key]) {
-      console.error(`❌ Missing env variable: ${key}`);
-      process.exit(1);
-    }
+  // ── Validate env ─────────────────────────────────────────────────────────
+  if (!process.env.NOTION_TOKEN) {
+    console.error('❌ Missing env variable: NOTION_TOKEN');
+    process.exit(1);
   }
 
-  // ── Load existing cache ───────────────────────────────────────────────────
+  // ── Load existing cache ──────────────────────────────────────────────────
   const cache = loadCache();
   const existingCount = Object.keys(cache.recipes).length;
   console.log(`📦 Loaded existing cache: ${existingCount} recipes\n`);
 
-  // ── Fetch all recipe pages from Notion ────────────────────────────────────
+  // ── Fetch all recipe pages from Notion ───────────────────────────────────
   console.log('🔍 Fetching recipe list from Notion...');
   const pages = await fetchAllRecipes();
   console.log(`✅ Found ${pages.length} pages in Notion\n`);
 
-  // Build deduplicated recipes_text (slug = id) for AI search
-  // Dedup by slug name to stay within Groq free tier token limits (~6k TPM)
-  const seenSlugs = new Set();
-  const uniquePages = pages.filter(p => {
-    const slug = nameFromUrl(p.url);
-    if (!slug || seenSlugs.has(slug)) return false;
-    seenSlugs.add(slug);
-    return true;
-  });
-  cache.recipes_text = uniquePages.map((p) => `${nameFromUrl(p.url)} = ${p.id}`).join('\n');
-  console.log(`📋 recipes_text: ${uniquePages.length} unique recipes (from ${pages.length} total pages)`);
-
-  // ── Process each recipe ───────────────────────────────────────────────────
   let processed = 0;
   let skipped = 0;
   let failed = 0;
+  let empty = 0;
 
   for (let i = 0; i < pages.length; i++) {
-    const { id, url } = pages[i];
-    const name = nameFromUrl(url);
+    const page = pages[i];
     const progress = `[${String(i + 1).padStart(3)}/${pages.length}]`;
 
     // Smart skip: already cached and fresh
-    if (isFresh(cache.recipes[id])) {
-      console.log(`${progress} ⏭  Skipping (fresh): ${name}`);
+    if (isFresh(cache.recipes[page.id])) {
+      console.log(`${progress} ⏭  Skipping (fresh): ${cache.recipes[page.id].name}`);
       skipped++;
       continue;
     }
 
-    console.log(`${progress} ⏳ Processing: ${name}`);
+    console.log(`${progress} 🔄 Processing: ${page.url.split('/').pop()}`);
 
     try {
-      // Fetch page blocks (top level)
       await sleep(NOTION_DELAY_MS);
-      const blocks = await fetchPageBlocks(id);
+      const topBlocks = await fetchPageBlocks(page.id);
+      const parsed = await parseRecipe(page, topBlocks);
 
-      // Convert to text (auto-fetches toggle/table children)
-      const { text: sourceText, photoBlockId, videoBlockId } = await blocksToText(blocks);
-
-      if (!sourceText.trim()) {
-        console.log(`         ⚠️  Empty content, skipping`);
-        skipped++;
+      if (!parsed) {
+        console.log('         ⚠️  Empty content — skipping');
+        empty++;
         continue;
       }
 
-      // Format with OpenAI
-      const formatted = await formatRecipe(sourceText);
-
-      if (!formatted) {
-        console.log(`         ⚠️  SKIP_RECIPE returned by OpenAI`);
-        skipped++;
-        continue;
-      }
-
-      // Save to cache (preserve existing file_ids if present)
-      const existing = cache.recipes[id] || {};
-      cache.recipes[id] = {
-        formatted_text: formatted,
-        photo_block_id: photoBlockId || null,
-        video_block_id: videoBlockId || null,
-        photo_file_id: existing.photo_file_id || '',
-        video_file_id: existing.video_file_id || '',
+      // Preserve previously-cached Telegram file_ids so the bot still serves
+      // photo/video instantly after the rebuild.
+      const previous = cache.recipes[page.id] || {};
+      cache.recipes[page.id] = {
+        ...parsed,
+        photo_file_id: previous.photo_file_id || '',
+        video_file_id: previous.video_file_id || '',
         cached_at: new Date().toISOString(),
       };
 
-      console.log(`         ✅ Done`);
+      console.log(`         ✅ ${parsed.name}`);
       processed++;
 
-      // Atomic save after each recipe so progress isn't lost on crash
+      // Atomic save after each recipe — progress survives a crash.
       cache.updated_at = new Date().toLocaleString('uk-UA', { timeZone: 'Africa/Cairo' });
       saveCache(cache);
 
     } catch (err) {
       console.error(`         ❌ Failed: ${err.message}`);
       failed++;
-      // Continue with next recipe — don't crash
     }
 
-    // Extra delay between recipes to respect Notion rate limit
     await sleep(NOTION_DELAY_MS);
   }
 
-  // ── Final save & summary ─────────────────────────────────────────────────
+  // ── Final summary ────────────────────────────────────────────────────────
   cache.updated_at = new Date().toLocaleString('uk-UA', { timeZone: 'Africa/Cairo' });
   saveCache(cache);
 
   console.log('\n══════════════════════════════');
   console.log('📊 Cache build complete:');
   console.log(`   ✅ Processed : ${processed}`);
-  console.log(`   ⏭  Skipped   : ${skipped}`);
+  console.log(`   ⏭  Skipped   : ${skipped} (fresh)`);
+  console.log(`   ⚠️  Empty     : ${empty}`);
   console.log(`   ❌ Failed    : ${failed}`);
   console.log(`   📦 Total     : ${Object.keys(cache.recipes).length} recipes in cache`);
   console.log('══════════════════════════════\n');
