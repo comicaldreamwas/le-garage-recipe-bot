@@ -133,6 +133,7 @@ async function main() {
       const stored = cache.recipes[page.id];
       processed.push(stored);
 
+      const media = (stored.photo_block_id ? '📷' : '· ') + (stored.video_block_id ? '🎥' : '· ');
       if (isEmpty(stored)) {
         console.log(`${progress} ⚠️  ${slugLabel} — empty (only title)`);
         emptyCount++;
@@ -145,11 +146,11 @@ async function main() {
         if (!stored.photo_block_id) extra.push('photo');
         if (!stored.video_block_id) extra.push('video');
         const tag = extra.length ? ` (no ${extra.join(', ')})` : '';
-        console.log(`${progress} ✅ ${stored.name}${tag}`);
+        console.log(`${progress} ✅ ${media} ${stored.name}${tag}`);
         completeCount++;
       } else {
         const miss = missingCritical(stored).join(', ');
-        console.log(`${progress} ⚠️  ${stored.name} — missing: ${miss}`);
+        console.log(`${progress} ⚠️  ${media} ${stored.name} — missing: ${miss}`);
         incompleteCount++;
       }
 
