@@ -77,6 +77,7 @@ Fill in `.env`:
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | From @BotFather |
 | `NOTION_TOKEN` | Notion integration token (`ntn_...`) |
+| `NOTION_PARENT_ID` | Parent page that scopes which recipes are loaded. Default = Le Garage Menu Cairo. |
 | `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs. Empty = open access. |
 
 To find your Telegram user ID, message [@userinfobot](https://t.me/userinfobot).
@@ -96,6 +97,20 @@ node bot.js
 ```
 
 You should see `✅ Bot is running on @YourBotName`.
+
+---
+
+## Multi-restaurant Notion setup
+
+This Notion integration can be shared by multiple restaurant workspaces.
+The bot filters recipe pages by parent: only pages that descend from
+`NOTION_PARENT_ID` end up in the cache. Default is **Le Garage Menu Cairo**
+(`24e30eca-90bc-80de-8c59-e3c7db23fb60`).
+
+To point the bot at a different restaurant, change `NOTION_PARENT_ID` in
+`.env` and re-run `node cache-builder.js`. Without this filter, recipes
+with the same name (e.g. "Mushroom Sauce") in different restaurants
+would conflict.
 
 ---
 
