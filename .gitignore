@@ -15,3 +15,8 @@ cache.log
 # PM2
 ecosystem.config.js
 .pm2/
+
+# Editor / agent local settings
+.claude/
+.vscode/
+.idea/
