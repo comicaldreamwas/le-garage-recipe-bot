@@ -23,6 +23,25 @@ function isFresh(recipe) {
   return age < CACHE_STALE_DAYS * 24 * 60 * 60 * 1000;
 }
 
+/**
+ * Normalize a Notion URL slug into a dedupe key. Strips the trailing
+ * 32-char page ID, lowercases, removes punctuation. Two pages with
+ * identical canonical slugs (one in El Gouna, one in Cairo) collapse
+ * to the same key.
+ *
+ *   /MUSHROOM-SAUCE-2ad2c25e... → "mushroomsauce"
+ *   /Mushroom-sauce-3fd2c25e... → "mushroomsauce"
+ */
+function slugKey(url) {
+  try {
+    const path = new URL(url).pathname.split('/').pop() || '';
+    const cleaned = path.replace(/-?[0-9a-f]{32}$/i, '');
+    return cleaned.toLowerCase().replace(/[^a-z0-9]/g, '');
+  } catch {
+    return '';
+  }
+}
+
 async function main() {
   console.log('🚀 Cache builder starting...\n');
 
@@ -36,8 +55,48 @@ async function main() {
   console.log(`📦 Loaded existing cache: ${existingCount} recipes\n`);
 
   console.log('🔍 Fetching recipe list from Notion...');
-  const pages = await fetchAllRecipes();
-  console.log(`✅ Found ${pages.length} pages in Notion\n`);
+  const allPages = await fetchAllRecipes();
+  console.log(`✅ Found ${allPages.length} pages in Notion\n`);
+
+  // ── Dedupe across databases ────────────────────────────────────────────
+  // Pages are already ordered: El Gouna (primary) first, then Cairo.
+  // We keep the first occurrence of each normalized slug and skip the
+  // rest so the kitchen sees one canonical version per dish.
+  const seenSlugs = new Map(); // slug → label that first held it
+  const pages = [];
+  const duplicatesDropped = [];
+  for (const page of allPages) {
+    const slug = slugKey(page.url);
+    if (slug && seenSlugs.has(slug)) {
+      duplicatesDropped.push({
+        slug,
+        from: page.database_label,
+        kept: seenSlugs.get(slug),
+        url: page.url,
+      });
+      continue;
+    }
+    if (slug) seenSlugs.set(slug, page.database_label || '?');
+    pages.push(page);
+  }
+
+  if (duplicatesDropped.length) {
+    console.log(`🔁 Deduplicated: ${duplicatesDropped.length} duplicates skipped`);
+    for (const d of duplicatesDropped.slice(0, 10)) {
+      console.log(`   • ${d.slug} (kept ${d.kept}, dropped ${d.from})`);
+    }
+    if (duplicatesDropped.length > 10) {
+      console.log(`   • …and ${duplicatesDropped.length - 10} more`);
+    }
+    console.log('');
+  }
+
+  // Also drop entries from the cache that match a slug we no longer want
+  // (e.g. a Cairo copy that was previously cached before dedupe existed).
+  const validIds = new Set(pages.map((p) => p.id));
+  for (const id of Object.keys(cache.recipes)) {
+    if (!validIds.has(id)) delete cache.recipes[id];
+  }
 
   const processed = [];   // every recipe (complete + incomplete)
   let skipped = 0;
