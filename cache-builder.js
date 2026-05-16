@@ -159,6 +159,28 @@ function printReport({ total, complete, incomplete, empty, skipped, failed, cach
     if (counts.allEmpty)       console.log(`  - ${counts.allEmpty} recipes are completely empty`);
     console.log(`\nSee ${REPORT_PATH} for full list with Notion URLs`);
   }
+
+  // Format breakdown — which Notion layout each recipe used.
+  const fmtCounts = {};
+  for (const r of processed) {
+    const f = r.format || 'empty';
+    fmtCounts[f] = (fmtCounts[f] || 0) + 1;
+  }
+  console.log('\nFormat breakdown:');
+  const order = ['toggle', 'toggle+mixed', 'table', 'list', 'mixed', 'paragraph', 'empty'];
+  const labels = {
+    toggle: 'Toggle-based',
+    'toggle+mixed': 'Toggle + table/list',
+    table: 'Header + table',
+    list: 'Header + list',
+    mixed: 'Header + list & table',
+    paragraph: 'Paragraph-only',
+    empty: 'No content detected',
+  };
+  for (const k of order) {
+    if (fmtCounts[k]) console.log(`  - ${labels[k]}: ${fmtCounts[k]} recipes`);
+  }
+
   console.log('═══════════════════════════════════\n');
 }
 
