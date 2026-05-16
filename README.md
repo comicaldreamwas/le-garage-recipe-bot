@@ -1,131 +1,136 @@
-# 🍽 Le Garage Recipe Bot
+# 🍽 Le Garage Recipe Bot — v2 (no AI)
 
-Telegram bot for kitchen staff at **Le Garage restaurant (Cairo)**. Staff send a dish name in any language — the bot replies with the full recipe (ingredients + preparation steps) in Arabic and English, plus a photo and video if available.
+Telegram bot for kitchen staff at **Le Garage restaurant (Cairo)**. Staff send a dish name in English or Arabic, and the bot replies with the full recipe (ingredients + preparation steps), plus the dish photo and video.
 
-**Speed:** 2–5 seconds vs. 15–30 seconds with the previous Make.com integration.
+**Speed:** 1–2 s response. **Cost:** zero — no AI APIs.
 
----
-
-## Features
-
-- Accepts dish names in Arabic, English, Ukrainian, or Russian
-- Returns formatted bilingual recipes (Arabic priority)
-- Sends recipe photo and video from Notion
-- User whitelist — only authorized staff can use it
-- Weekly cache build — no live Notion API calls during normal use
-- Auto-reloads cache when `cache-builder.js` updates it
+Recipes come straight from Notion. The bot uses a hand-curated translation dictionary plus Levenshtein fuzzy matching to map free-form input to the right recipe slug.
 
 ---
 
-## Project Structure
+## Why no AI?
+
+The previous version called Groq/LLaMA for both search and bilingual formatting. That worked, but:
+
+- API calls add 2–5 s of latency per request.
+- LLMs occasionally rewrite quantities (a kitchen disaster).
+- Rate limits and token costs creep up at scale.
+
+This version is fully deterministic. Add a new recipe to Notion → run `cache-builder.js` → it appears in the bot exactly as written.
+
+---
+
+## Architecture
 
 ```
 le-garage-recipe-bot/
 ├── lib/
-│   ├── cache.js       — cache load/save/watch
-│   ├── notion.js      — Notion API helpers (pages, blocks, file URLs)
-│   ├── openai.js      — OpenAI helpers (recipe search + formatting)
-│   └── telegram.js    — send recipe text + photo + video
-├── bot.js             — main Telegram bot (runs continuously)
-├── cache-builder.js   — builds recipes-cache.json from Notion
-├── .env.example       — environment variable template
-└── recipes-cache.json — generated cache (gitignored)
+│   ├── dictionary.js   — EN+AR translation map + opposites
+│   ├── normalize.js    — strip emoji, punctuation, stop words
+│   ├── fuzzy.js        — Levenshtein-based typo tolerance
+│   ├── search.js       — keyword extraction + opposites scoring + suggestions
+│   ├── format.js       — static recipe template (EN + AR)
+│   ├── parser.js       — Notion blocks → structured cache entry
+│   ├── notion.js       — Notion API helpers
+│   ├── cache.js        — atomic load/save + hot-reload watcher
+│   └── telegram.js     — send recipe text + photo + video
+├── bot.js              — Telegram bot (PM2-managed in prod)
+├── cache-builder.js    — rebuilds recipes-cache.json from Notion
+├── .env.example
+└── recipes-cache.json  — generated, gitignored
 ```
+
+### How search works
+
+1. Normalize: lower-case, strip emoji and punctuation, drop EN+AR stop words (`please`, `من فضلك`, …).
+2. Multi-word phrases first (e.g. `goat cheese` → `GOAT-CHEESE`), then individual words.
+3. Each word goes through exact-match → Arabic-article strip (`الترفل` → `ترفل`) → Levenshtein fuzzy match (1 edit for 3–4 chars, 2 edits for 5+).
+4. Score every cached recipe by how many keywords its URL slug contains.
+5. Reject candidates that violate `OPPOSITES` pairs (`SAUCE`≠`OIL`, `SALAD`≠`SOUP`, `CHICKEN`≠`BEEF`, `BURGER`≠`SANDWICH`).
+6. Return the highest score, or `null` if nothing meets the minimum.
+7. On `null`, send a "Did you mean / هل تقصد:" list of recipes that share at least one keyword.
+
+To support a new dish keyword, just add its English and Arabic spellings to [lib/dictionary.js](lib/dictionary.js).
 
 ---
 
 ## Setup
 
-### 1. Requirements
+### Requirements
 
 - Node.js 20+
-- A Notion integration with access to the recipe workspace
-- OpenAI API key (GPT-4o-mini for search, GPT-4o for formatting)
+- A Notion integration with access to your recipe workspace
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 
-### 2. Clone & install
+### Install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/le-garage-recipe-bot.git
+git clone https://github.com/comicaldreamwas/le-garage-recipe-bot.git
 cd le-garage-recipe-bot
 npm install
-```
-
-### 3. Configure environment
-
-```bash
 cp .env.example .env
-nano .env   # or use any editor
 ```
 
-Fill in:
+Fill in `.env`:
 
 | Variable | Description |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | From @BotFather |
-| `NOTION_TOKEN` | Notion integration secret (`ntn_...`) |
-| `OPENAI_API_KEY` | OpenAI API key (`sk-...`) |
-| `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs |
+| `NOTION_TOKEN` | Notion integration token (`ntn_...`) |
+| `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs. Empty = open access. |
 
 To find your Telegram user ID, message [@userinfobot](https://t.me/userinfobot).
 
-### 4. Build the cache
+### Build the cache
 
 ```bash
 node cache-builder.js
 ```
 
-This fetches all ~190 recipes from Notion, formats them with OpenAI, and saves to `recipes-cache.json`. Takes **15–20 minutes** on first run.
+Fetches every recipe page from Notion, parses each into `{ ingredients_en, ingredients_ar, prep_en, prep_ar, photo_block_id, video_block_id }`, and writes `recipes-cache.json`. First run takes ~10 min for ~190 recipes; subsequent runs skip pages cached within the last 7 days.
 
-Subsequent runs skip recipes already cached (< 7 days old) and finish in **1–2 minutes**.
-
-### 5. Start the bot
+### Start the bot
 
 ```bash
 node bot.js
 ```
 
-Console output: `✅ Bot is running on @YourBotName`
+You should see `✅ Bot is running on @YourBotName`.
 
 ---
 
-## Production Deployment (VPS)
+## Production deployment (VPS)
 
-Tested on Ubuntu 22.04. Recommended VPS region: Frankfurt or Amsterdam (low latency to Egypt + Notion US-West API).
-
-### Install PM2
+Tested on Ubuntu 22.04.
 
 ```bash
+git clone https://github.com/comicaldreamwas/le-garage-recipe-bot.git /opt/le-garage-recipe-bot
+cd /opt/le-garage-recipe-bot
+npm install --omit=dev
+cp .env.example .env && nano .env
+node cache-builder.js
+
 npm install -g pm2
-```
-
-### Start with PM2
-
-```bash
 pm2 start bot.js --name recipe-bot
 pm2 save
-pm2 startup   # follow the printed command to enable auto-start on reboot
+pm2 startup     # follow the printed command to enable auto-start
 ```
 
-### Check logs
-
-```bash
-pm2 logs recipe-bot
-pm2 status
-```
-
-### Weekly cache refresh (cron)
+### Weekly cache refresh
 
 ```bash
 crontab -e
 ```
 
-Add:
 ```
-0 3 * * 0 cd /path/to/le-garage-recipe-bot && node cache-builder.js >> cache.log 2>&1
+0 3 * * 0 cd /opt/le-garage-recipe-bot && /usr/bin/node cache-builder.js >> cache.log 2>&1
 ```
 
-This runs every Sunday at 3:00 AM.
+This rebuilds the cache every Sunday at 03:00. The bot hot-reloads it automatically.
+
+### Auto-deploy on git push
+
+This repo ships [.github/workflows/deploy.yml](.github/workflows/deploy.yml). Pushing to `master` SSHes into the VPS, pulls, reinstalls, and restarts PM2. Requires the GitHub secrets `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`.
 
 ---
 
@@ -133,35 +138,28 @@ This runs every Sunday at 3:00 AM.
 
 Send any dish name to the bot:
 
-| Language | Example |
+| Input | Result |
 |---|---|
-| English | `truffle sauce` |
-| Ukrainian | `грибний соус` |
-| Russian | `грибной соус` |
-| Arabic | `صوصة الترافل` |
+| `mushroom sauce` | Mushroom Sauce recipe |
+| `chicken alfredo` | Chicken Alfredo Pasta |
+| `mushrum sauce` (typo) | Mushroom Sauce — fuzzy matched |
+| `🍕 pizza please` | Pizza — emoji & stop words stripped |
+| `صلصة الترفل` | Truffle Sauce |
+| `xyz` | "Did you mean…" suggestions if any keyword overlaps |
 
-The bot replies with the full recipe in Arabic + English, plus photo and video.
-
----
-
-## How It Works
-
-1. **Cache builder** (`cache-builder.js`) fetches all recipe pages from Notion, extracts block content (including toggle and table children), formats with OpenAI, and saves to `recipes-cache.json`.
-
-2. **Bot** (`bot.js`) listens for messages, sends "⏳ Searching..." immediately, then uses OpenAI to find the recipe ID from the cached list. Serves formatted text + photo + video from cache. Falls back to live Notion fetch if recipe is missing from cache.
-
-3. **Photo/video optimization**: first send uses Notion URL (~2s). Telegram returns a `file_id` which is saved to cache — subsequent sends use the `file_id` and are instant (<500ms).
+The bot replies with the recipe in Arabic + English, plus photo and video. First send fetches media URLs from Notion (~2 s); subsequent sends use the cached Telegram `file_id` and are instant.
 
 ---
 
-## Environment Variables
+## Environment variables
 
 | Variable | Required | Description |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | ✅ | Telegram bot token |
 | `NOTION_TOKEN` | ✅ | Notion integration token |
-| `OPENAI_API_KEY` | ✅ | OpenAI API key |
-| `ALLOWED_USER_IDS` | ✅ | Comma-separated allowed Telegram user IDs |
+| `ALLOWED_USER_IDS` | optional | Comma-separated user IDs. Empty = open access. |
+
+No `OPENAI_API_KEY` — the bot does not call any AI service.
 
 ---
 
