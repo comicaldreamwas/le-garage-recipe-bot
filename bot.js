@@ -7,6 +7,9 @@ const { loadCache, watchCache } = require('./lib/cache');
 const { searchRecipe, suggestRecipes } = require('./lib/search');
 const { formatRecipe, formatSuggestions, formatBrokenReport, NOT_FOUND_MESSAGE } = require('./lib/format');
 const { sendRecipe } = require('./lib/telegram');
+const { verifyInBackground } = require('./lib/verify');
+const { fetchPageBlocks } = require('./lib/notion');
+const { parseRecipe, hashRecipeFields } = require('./lib/parser');
 
 // ── Validate env ─────────────────────────────────────────────────────────────
 const required = ['TELEGRAM_BOT_TOKEN', 'NOTION_TOKEN'];
@@ -92,6 +95,78 @@ bot.command('incomplete', async (ctx) => {
   }
 });
 
+function isAdmin(userId) {
+  const id = process.env.ADMIN_USER_ID;
+  return id && String(userId) === String(id);
+}
+
+function esc(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// /verify <name>      — show side-by-side cache vs live Notion for one recipe
+// /verify --all       — run the full audit and DM the report header
+bot.command('verify', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) {
+    await ctx.reply('🚫 Admin only.');
+    return;
+  }
+  const arg = ctx.message.text.replace(/^\/verify(@\w+)?\s*/, '').trim();
+  if (arg === '--all' || arg === '-a') {
+    await ctx.reply('🛡 Full verification kicked off. Watch the server log /tmp/full-verify-report.md.\nRun on shell: <code>node scripts/full-verify.js</code>', { parse_mode: 'HTML' });
+    return;
+  }
+  if (!arg) {
+    await ctx.reply('Usage:\n<code>/verify &lt;recipe name&gt;</code>\n<code>/verify --all</code>', { parse_mode: 'HTML' });
+    return;
+  }
+
+  const match = searchRecipe(arg, cache.recipes);
+  if (!match) {
+    await ctx.reply(`🔍 No cached recipe matched "${esc(arg)}".`, { parse_mode: 'HTML' });
+    return;
+  }
+  const cached = match.recipe;
+  try {
+    const blocks = await fetchPageBlocks(match.id);
+    const fresh = await parseRecipe({
+      id: match.id, url: cached.url, properties: {}, parent: {},
+      database_id: null,
+      database_label: cached.restaurant === 'el_gouna' ? 'El Gouna' : cached.restaurant === 'cairo' ? 'Cairo' : null,
+      last_edited_time: null,
+    }, blocks);
+    const cH = cached.hashes || hashRecipeFields(cached);
+    const fH = hashRecipeFields(fresh);
+    const fields = ['name', 'ingredients_en', 'ingredients_ar', 'prep_en', 'prep_ar'];
+    const drift = fields.filter((f) => cH[f] !== fH[f]);
+
+    const cn = (s) => (s || '').split('\n').filter(Boolean).length;
+    const lines = [
+      `📋 <b>VERIFY:</b> ${esc(cached.name)}`,
+      `<a href="${esc(cached.url)}">Open in Notion</a>`,
+      '',
+      '<b>CACHE</b>',
+      `🇬🇧 ingredients: ${cn(cached.ingredients_en)} lines`,
+      `🇪🇬 ingredients: ${cn(cached.ingredients_ar)} lines`,
+      `🇬🇧 prep: ${cn(cached.prep_en)} lines`,
+      `🇪🇬 prep: ${cn(cached.prep_ar)} lines`,
+      '',
+      '<b>NOTION (live)</b>',
+      `🇬🇧 ingredients: ${cn(fresh.ingredients_en)} lines`,
+      `🇪🇬 ingredients: ${cn(fresh.ingredients_ar)} lines`,
+      `🇬🇧 prep: ${cn(fresh.prep_en)} lines`,
+      `🇪🇬 prep: ${cn(fresh.prep_ar)} lines`,
+      '',
+      drift.length === 0
+        ? '✅ <b>Cache matches Notion.</b>'
+        : `⚠️ <b>Drift in:</b> <code>${drift.join(', ')}</code>\nAction: <code>node cache-builder.js</code>`,
+    ];
+    await ctx.reply(lines.join('\n'), { parse_mode: 'HTML', disable_web_page_preview: true });
+  } catch (err) {
+    await ctx.reply(`💥 Verify failed: ${esc(err.message)}`, { parse_mode: 'HTML' });
+  }
+});
+
 // Maintenance-mode toggle. When /tmp/maintenance.flag exists the bot
 // stays online but answers every query with a "🔧 Under maintenance"
 // notice — useful while running the audit or rebuilding the cache.
@@ -155,6 +230,12 @@ bot.on('text', async (ctx) => {
       `   ✅ ${match.recipe.name} (score=${match.score} kw=${match.keywords.join(',')}) ` +
       `(${Date.now() - startTime}ms)`
     );
+
+    // Background verify — re-fetches the same page from Notion and
+    // compares hashes. Doesn't block the user. Logs drift to
+    // /tmp/runtime-mismatches.log and DMs the admin if ADMIN_USER_ID
+    // is set. TTL-cached per recipe so we don't hammer Notion.
+    verifyInBackground(bot, { ...match.recipe, source_page_id: match.id }, query, userId);
   } catch (err) {
     console.error(`   💥 Error: ${err.message}`);
     try {
@@ -175,14 +256,58 @@ async function editOrReply(ctx, statusMsg, text) {
   }
 }
 
+// ── Startup verification ────────────────────────────────────────────────────
+// Sample 5 random cached recipes and confirm their hashes still match
+// Notion. Logs to console; never blocks startup.
+async function startupVerificationSample() {
+  const ids = Object.keys(cache.recipes || {});
+  if (ids.length === 0) return;
+  const pick = [];
+  while (pick.length < Math.min(5, ids.length)) {
+    const id = ids[Math.floor(Math.random() * ids.length)];
+    if (!pick.includes(id)) pick.push(id);
+  }
+  console.log('🔍 Startup verification (5 random samples):');
+  let okN = 0;
+  for (const id of pick) {
+    const cached = cache.recipes[id];
+    try {
+      const blocks = await fetchPageBlocks(id);
+      const fresh = await parseRecipe({
+        id, url: cached.url, properties: {}, parent: {}, database_id: null,
+        database_label: cached.restaurant === 'el_gouna' ? 'El Gouna' : cached.restaurant === 'cairo' ? 'Cairo' : null,
+        last_edited_time: null,
+      }, blocks);
+      const cH = cached.hashes || hashRecipeFields(cached);
+      const fH = hashRecipeFields(fresh);
+      const fields = ['name', 'ingredients_en', 'ingredients_ar', 'prep_en', 'prep_ar'];
+      const drift = fields.filter((f) => cH[f] !== fH[f]);
+      if (drift.length === 0) {
+        console.log(`   ✅ ${cached.name}`);
+        okN++;
+      } else {
+        console.log(`   ⚠️ ${cached.name} — drift in ${drift.join(', ')}`);
+      }
+    } catch (err) {
+      console.log(`   🚫 ${cached.name} — ${err.message}`);
+    }
+  }
+  console.log(`Result: ${okN}/${pick.length} match (${Math.round(100 * okN / pick.length)}%)`);
+  if (okN < pick.length) {
+    console.log('Recommendation: cache may need refresh — run `node cache-builder.js`');
+  }
+}
+
 // ── Launch ───────────────────────────────────────────────────────────────────
 // bot.launch() resolves only when the bot stops, so log startup separately.
 bot.telegram
   .getMe()
-  .then((info) => {
+  .then(async (info) => {
     console.log(`\n✅ Bot is running on @${info.username}`);
     console.log(`   Cache: ${Object.keys(cache.recipes).length} recipes`);
     console.log(`   Whitelist: ${allowedIds.length === 0 ? 'open' : allowedIds.length + ' users'}\n`);
+    // Fire-and-forget sample verification so startup isn't blocked.
+    startupVerificationSample().catch(() => {});
   })
   .catch((err) => {
     console.error('💥 Failed to connect to Telegram:', err.message);
