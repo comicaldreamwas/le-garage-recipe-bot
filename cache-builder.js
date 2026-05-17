@@ -102,8 +102,21 @@ async function main() {
         scored.push({ page: g, parsed: null, score: -1 });
       }
     }
-    // Sort: highest score wins; ties → El Gouna preferred (was already ordered first)
-    scored.sort((a, b) => b.score - a.score);
+    // Sort: most-recently-edited wins. Recency is the primary signal
+    // because the user maintains one database as canonical and lets
+    // the other lag — sometimes by months. The completeness score
+    // tends to favour El Gouna (it carries the structured Notion
+    // template with prep + storage sections) over Cairo (which often
+    // stores just the ingredient bullet list), so score-first
+    // dedupe systematically picks the stale copy even when Cairo was
+    // updated 3 months later. Score is kept only as final tiebreaker
+    // for the rare case where two copies share the same timestamp.
+    scored.sort((a, b) => {
+      const ea = new Date(a.page.last_edited_time || 0).getTime();
+      const eb = new Date(b.page.last_edited_time || 0).getTime();
+      if (eb !== ea) return eb - ea;
+      return b.score - a.score;
+    });
     const winner = scored[0];
     pages.push(winner.page);
     // Pre-populate the parsed copy so the main loop can reuse it.
@@ -125,7 +138,14 @@ async function main() {
         url: loser.page.url,
       });
     }
-    console.log(`   → kept ${winner.page.database_label} (score=${winner.score})`);
+    // Log the choice with editedness so the rebuild log shows whether
+    // the tiebreaker mattered.
+    const wEdit = (winner.page.last_edited_time || '').slice(0, 10) || '?';
+    const loseInfo = scored.slice(1).map((l) => {
+      const lEdit = (l.page.last_edited_time || '').slice(0, 10) || '?';
+      return `${l.page.database_label}@${lEdit}`;
+    }).join(', ');
+    console.log(`   → kept ${winner.page.database_label}@${wEdit} (score=${winner.score}) over ${loseInfo}`);
   }
 
   if (duplicatesDropped.length) {
