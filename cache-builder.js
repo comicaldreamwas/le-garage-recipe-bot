@@ -164,6 +164,19 @@ async function main() {
       const topBlocks = await fetchPageBlocks(page.id);
       const parsed = await parseRecipe(page, topBlocks);
 
+      // Self-verify: re-parse the SAME blocks a second time and confirm
+      // the field hashes line up. Catches non-determinism in the parser
+      // (rare) and table-row ordering quirks. Cheap because no extra
+      // Notion fetch — we reuse the blocks we already pulled.
+      const reparsed = await parseRecipe(page, topBlocks);
+      const driftFields = [];
+      for (const k of ['name', 'ingredients_en', 'ingredients_ar', 'prep_en', 'prep_ar']) {
+        if (parsed.hashes?.[k] !== reparsed.hashes?.[k]) driftFields.push(k);
+      }
+      if (driftFields.length) {
+        console.warn(`         ⚠️  parser non-determinism on ${driftFields.join(',')} — keeping first parse`);
+      }
+
       // Always store — even empty pages — so owner sees them in /broken.
       const previous = cache.recipes[page.id] || {};
       cache.recipes[page.id] = {
