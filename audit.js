@@ -145,13 +145,23 @@ async function main() {
   const mismatches = [];
   const stale = [];
   const empty = [];
+  const orphans = [];
   let ok = 0;
 
   let processed = 0;
   for (const p of pages) {
     processed++;
     const cached = cachedById[p.id];
-    if (!cached) continue; // dedupe drop or new page since last build
+    if (!cached) {
+      // Page exists in Notion but not in cache — either dropped by
+      // dedupe (a duplicate copy) or a new/edited page since the last
+      // cache-builder run.
+      const inDupGroup = duplicates.some((d) => d.copies.some((c) => c.page.id === p.id));
+      if (!inDupGroup) {
+        orphans.push({ id: p.id, url: p.url, edited: p.last_edited_time });
+      }
+      continue;
+    }
     if (processed % 25 === 0) {
       console.log(`   [${processed}/${pages.length}] checking…`);
     }
@@ -176,12 +186,27 @@ async function main() {
       }
 
       if (cEn !== lEn || cAr !== lAr || cPep !== lPep || cPap !== lPap) {
+        // For ingredient mismatches, also surface the diff lines so the
+        // owner can see exactly what changed (e.g. "+ Mustard: 10 g").
+        const diffSamples = {};
+        const collectDiff = (field) => {
+          const cachedSet = new Set((cached[field] || '').split('\n').map(s => s.trim()).filter(Boolean));
+          const liveSet = new Set((live[field] || '').split('\n').map(s => s.trim()).filter(Boolean));
+          const added = [...liveSet].filter(x => !cachedSet.has(x));
+          const removed = [...cachedSet].filter(x => !liveSet.has(x));
+          if (added.length || removed.length) {
+            diffSamples[field] = { added: added.slice(0, 5), removed: removed.slice(0, 5) };
+          }
+        };
+        for (const f of ['ingredients_en', 'ingredients_ar', 'prep_en', 'prep_ar']) collectDiff(f);
+
         mismatches.push({
           id: p.id,
           name: cached.name,
           url: p.url,
           cache: { ing_en: cEn, ing_ar: cAr, prep_en: cPep, prep_ar: cPap },
           live:  { ing_en: lEn, ing_ar: lAr, prep_en: lPep, prep_ar: lPap },
+          diffs: diffSamples,
         });
         continue;
       }
@@ -218,6 +243,7 @@ async function main() {
   lines.push(`- Cache-vs-Notion mismatches: ${mismatches.length}`);
   lines.push(`- Stale (Notion newer than cache): ${stale.length}`);
   lines.push(`- Empty (cached but no content): ${empty.length}`);
+  lines.push(`- Orphan (Notion has, cache doesn't): ${orphans.length}`);
   lines.push(`- ✅ Valid and current: ${ok}`);
   lines.push('');
 
@@ -233,12 +259,22 @@ async function main() {
       } else {
         lines.push(`Cache  → ing_en=${m.cache.ing_en} | ing_ar=${m.cache.ing_ar} | prep_en=${m.cache.prep_en} | prep_ar=${m.cache.prep_ar}`);
         lines.push(`Notion → ing_en=${m.live.ing_en} | ing_ar=${m.live.ing_ar} | prep_en=${m.live.prep_en} | prep_ar=${m.live.prep_ar}`);
-        const diffs = [];
-        if (m.cache.ing_en !== m.live.ing_en) diffs.push(`ing_en (${m.cache.ing_en} → ${m.live.ing_en})`);
-        if (m.cache.ing_ar !== m.live.ing_ar) diffs.push(`ing_ar (${m.cache.ing_ar} → ${m.live.ing_ar})`);
-        if (m.cache.prep_en !== m.live.prep_en) diffs.push(`prep_en (${m.cache.prep_en} → ${m.live.prep_en})`);
-        if (m.cache.prep_ar !== m.live.prep_ar) diffs.push(`prep_ar (${m.cache.prep_ar} → ${m.live.prep_ar})`);
-        lines.push(`Diffs  → ${diffs.join(', ')}`);
+        const summary = [];
+        if (m.cache.ing_en !== m.live.ing_en) summary.push(`ing_en (${m.cache.ing_en} → ${m.live.ing_en})`);
+        if (m.cache.ing_ar !== m.live.ing_ar) summary.push(`ing_ar (${m.cache.ing_ar} → ${m.live.ing_ar})`);
+        if (m.cache.prep_en !== m.live.prep_en) summary.push(`prep_en (${m.cache.prep_en} → ${m.live.prep_en})`);
+        if (m.cache.prep_ar !== m.live.prep_ar) summary.push(`prep_ar (${m.cache.prep_ar} → ${m.live.prep_ar})`);
+        lines.push(`Diffs  → ${summary.join(', ')}`);
+        if (m.diffs) {
+          for (const [field, d] of Object.entries(m.diffs)) {
+            if (d.added.length) {
+              for (const x of d.added) lines.push(`   + [${field}] ${x}`);
+            }
+            if (d.removed.length) {
+              for (const x of d.removed) lines.push(`   - [${field}] ${x}`);
+            }
+          }
+        }
       }
       lines.push('Action: re-run `node cache-builder.js`');
       lines.push('');
@@ -284,6 +320,20 @@ async function main() {
     }
     lines.push('');
     lines.push('Action: add content in Notion or delete the page');
+    lines.push('');
+  }
+
+  if (orphans.length) {
+    lines.push('## 👻 ORPHAN — Pages in Notion but NOT in cache');
+    lines.push('Either added/edited after last cache build, or the parser');
+    lines.push('rejected them. Re-run cache-builder to pick them up.');
+    lines.push('');
+    for (const o of orphans) {
+      lines.push(`- ${slugFromUrl(o.url)}  (edited ${o.edited})`);
+      lines.push(`  ${o.url}`);
+    }
+    lines.push('');
+    lines.push('Action: `node cache-builder.js`');
     lines.push('');
   }
 

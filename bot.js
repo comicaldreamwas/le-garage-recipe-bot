@@ -92,6 +92,15 @@ bot.command('incomplete', async (ctx) => {
   }
 });
 
+// Maintenance-mode toggle. When /tmp/maintenance.flag exists the bot
+// stays online but answers every query with a "🔧 Under maintenance"
+// notice — useful while running the audit or rebuilding the cache.
+const fs = require('fs');
+const MAINTENANCE_FLAG = '/tmp/maintenance.flag';
+function inMaintenance() {
+  try { fs.accessSync(MAINTENANCE_FLAG); return true; } catch { return false; }
+}
+
 bot.on('text', async (ctx) => {
   const startTime = Date.now();
   const query = ctx.message.text.trim();
@@ -99,6 +108,11 @@ bot.on('text', async (ctx) => {
   const username = ctx.from.username || ctx.from.first_name || String(userId);
 
   console.log(`\n📩 [${new Date().toISOString()}] @${username} (${userId}): "${query}"`);
+
+  if (inMaintenance()) {
+    await ctx.reply('🔧 Under maintenance. Please try again in a few minutes.\n🔧 صيانة. يرجى المحاولة بعد دقائق.');
+    return;
+  }
 
   if (!isAllowed(userId)) {
     console.log('   🚫 Blocked (not in whitelist)');
