@@ -59,35 +59,77 @@ async function main() {
   console.log(`✅ Found ${allPages.length} pages in Notion\n`);
 
   // ── Dedupe across databases ────────────────────────────────────────────
-  // Pages are already ordered: El Gouna (primary) first, then Cairo.
-  // We keep the first occurrence of each normalized slug and skip the
-  // rest so the kitchen sees one canonical version per dish.
-  const seenSlugs = new Map(); // slug → label that first held it
-  const pages = [];
-  const duplicatesDropped = [];
+  // El Gouna and Cairo databases often hold the same dish slug, but the
+  // two copies aren't always equally complete. Pre-parse every duplicate
+  // and pick the version with the most ingredient coverage (both EN+AR
+  // ingredients > one language > nothing). Ties prefer El Gouna.
+  const slugGroups = new Map();
   for (const page of allPages) {
     const slug = slugKey(page.url);
-    if (slug && seenSlugs.has(slug)) {
-      duplicatesDropped.push({
-        slug,
-        from: page.database_label,
-        kept: seenSlugs.get(slug),
-        url: page.url,
-      });
+    if (!slug) { (slugGroups.get('') || slugGroups.set('', []).get('')).push(page); continue; }
+    if (!slugGroups.has(slug)) slugGroups.set(slug, []);
+    slugGroups.get(slug).push(page);
+  }
+
+  const pages = [];
+  const duplicatesDropped = [];
+
+  function scoreCandidate(parsed) {
+    const c = parsed.completeness || {};
+    return (c.has_ingredients_en ? 2 : 0)
+         + (c.has_ingredients_ar ? 2 : 0)
+         + (c.has_prep_en        ? 1 : 0)
+         + (c.has_prep_ar        ? 1 : 0)
+         + (c.has_photo          ? 1 : 0)
+         + (c.has_video          ? 1 : 0);
+  }
+
+  for (const [slug, group] of slugGroups) {
+    if (!slug || group.length === 1) {
+      pages.push(...group);
       continue;
     }
-    if (slug) seenSlugs.set(slug, page.database_label || '?');
-    pages.push(page);
+    // Multiple candidates — parse each, pick the most complete.
+    console.log(`🔁 Resolving ${group.length} copies of '${slug}'…`);
+    const scored = [];
+    for (const g of group) {
+      try {
+        await sleep(NOTION_DELAY_MS);
+        const blocks = await fetchPageBlocks(g.id);
+        const parsed = await parseRecipe(g, blocks);
+        scored.push({ page: g, parsed, score: scoreCandidate(parsed) });
+      } catch (err) {
+        scored.push({ page: g, parsed: null, score: -1 });
+      }
+    }
+    // Sort: highest score wins; ties → El Gouna preferred (was already ordered first)
+    scored.sort((a, b) => b.score - a.score);
+    const winner = scored[0];
+    pages.push(winner.page);
+    // Pre-populate the parsed copy so the main loop can reuse it.
+    winner._parsed = winner.parsed;
+    cache.recipes[winner.page.id] = {
+      ...winner.parsed,
+      photo_file_id: cache.recipes[winner.page.id]?.photo_file_id || '',
+      video_file_id: cache.recipes[winner.page.id]?.video_file_id || '',
+      cached_at: new Date().toISOString(),
+    };
+    for (let i = 1; i < scored.length; i++) {
+      const loser = scored[i];
+      duplicatesDropped.push({
+        slug,
+        from: loser.page.database_label,
+        kept: winner.page.database_label,
+        score: loser.score,
+        kept_score: winner.score,
+        url: loser.page.url,
+      });
+    }
+    console.log(`   → kept ${winner.page.database_label} (score=${winner.score})`);
   }
 
   if (duplicatesDropped.length) {
-    console.log(`🔁 Deduplicated: ${duplicatesDropped.length} duplicates skipped`);
-    for (const d of duplicatesDropped.slice(0, 10)) {
-      console.log(`   • ${d.slug} (kept ${d.kept}, dropped ${d.from})`);
-    }
-    if (duplicatesDropped.length > 10) {
-      console.log(`   • …and ${duplicatesDropped.length - 10} more`);
-    }
+    console.log(`🔁 Deduplicated: ${duplicatesDropped.length} losers dropped`);
     console.log('');
   }
 
