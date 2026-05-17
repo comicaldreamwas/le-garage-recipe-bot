@@ -44,26 +44,26 @@ const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
 bot.start(async (ctx) => {
   await ctx.reply(
-    '👨‍🍳 *Le Garage Recipe Bot*\n\n' +
+    '👨‍🍳 <b>Le Garage Recipe Bot</b>\n\n' +
     'Send a dish name in English or Arabic and I will reply with the recipe.\n\n' +
-    '*Examples:*\n' +
-    '• `mushroom sauce`\n' +
-    '• `chicken alfredo`\n' +
-    '• `صلصة الترفل`\n' +
-    '• `شوربة عدس`',
-    { parse_mode: 'Markdown' }
+    '<b>Examples:</b>\n' +
+    '• <code>mushroom sauce</code>\n' +
+    '• <code>chicken alfredo</code>\n' +
+    '• <code>صلصة الترفل</code>\n' +
+    '• <code>شوربة عدس</code>',
+    { parse_mode: 'HTML' }
   );
 });
 
 bot.help(async (ctx) => {
   await ctx.reply(
-    '📖 *How to use*\n\n' +
+    '📖 <b>How to use</b>\n\n' +
     'Just type the dish name — no commands needed.\n' +
     'Typos are OK; the bot will try to figure it out.\n\n' +
-    '*Languages:* 🇬🇧 English · 🇪🇬 العربية\n\n' +
-    '*Admin commands:*\n' +
-    '`/broken` — list recipes that need fixing in Notion',
-    { parse_mode: 'Markdown' }
+    '<b>Languages:</b> 🇬🇧 English · 🇪🇬 العربية\n\n' +
+    '<b>Admin commands:</b>\n' +
+    '<code>/broken</code> — list recipes that need fixing in Notion',
+    { parse_mode: 'HTML' }
   );
 });
 
@@ -76,7 +76,7 @@ bot.command('broken', async (ctx) => {
   }
   const messages = formatBrokenReport(cache.recipes);
   for (const m of messages) {
-    await ctx.reply(m, { parse_mode: 'Markdown', disable_web_page_preview: true });
+    await ctx.reply(m, { parse_mode: 'HTML', disable_web_page_preview: true });
   }
 });
 
@@ -88,7 +88,7 @@ bot.command('incomplete', async (ctx) => {
   }
   const messages = formatBrokenReport(cache.recipes);
   for (const m of messages) {
-    await ctx.reply(m, { parse_mode: 'Markdown', disable_web_page_preview: true });
+    await ctx.reply(m, { parse_mode: 'HTML', disable_web_page_preview: true });
   }
 });
 
@@ -126,7 +126,7 @@ bot.on('text', async (ctx) => {
     if (!match) {
       const suggestions = suggestRecipes(query, cache.recipes, 5);
       if (suggestions.length > 0) {
-        await ctx.reply(formatSuggestions(suggestions), { parse_mode: 'Markdown' });
+        await ctx.reply(formatSuggestions(suggestions), { parse_mode: 'HTML' });
       } else {
         await ctx.reply(NOT_FOUND_MESSAGE);
       }
@@ -154,7 +154,7 @@ bot.on('text', async (ctx) => {
 async function editOrReply(ctx, statusMsg, text) {
   try {
     await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, text, {
-      parse_mode: 'Markdown',
+      parse_mode: 'HTML',
     });
   } catch {
     await ctx.reply(text);
