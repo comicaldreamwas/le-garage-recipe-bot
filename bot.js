@@ -10,6 +10,7 @@ const { sendRecipe } = require('./lib/telegram');
 const { verifyInBackground } = require('./lib/verify');
 const { fetchPageBlocks } = require('./lib/notion');
 const { parseRecipe, hashRecipeFields } = require('./lib/parser');
+const { rebuildAutoTerms, autoStats } = require('./lib/autoTerms');
 
 // ── Validate env ─────────────────────────────────────────────────────────────
 const required = ['TELEGRAM_BOT_TOKEN', 'NOTION_TOKEN'];
@@ -37,8 +38,18 @@ function isAllowed(userId) {
 let cache = loadCache();
 console.log(`📦 Cache loaded: ${Object.keys(cache.recipes).length} recipes`);
 
+// Build the auto-dictionary from recipe names so search picks up
+// words like "basket" or "delight" that aren't in the hand-curated
+// DICTIONARY but appear in real dish titles.
+rebuildAutoTerms(cache.recipes);
+{
+  const s = autoStats();
+  console.log(`🧠 Auto-terms: ${s.words} words, ${s.phrases} phrases`);
+}
+
 watchCache((fresh) => {
   cache = fresh;
+  rebuildAutoTerms(cache.recipes);
   console.log(`🔄 Cache reloaded: ${Object.keys(cache.recipes).length} recipes`);
 });
 
