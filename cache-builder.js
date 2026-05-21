@@ -204,6 +204,7 @@ async function buildBoho(cache) {
   }
   let droppedDup = 0;
   let keptUnique = 0;
+  let droppedEmpty = 0;
   for (const [id, r] of Object.entries(recipes)) {
     if (!r.low_structure) continue;
     const n = norm(r.name);
@@ -212,6 +213,16 @@ async function buildBoho(cache) {
       delete recipes[id];
       droppedDup++;
       console.log(`   [boho] drop noname: ${r.url}`);
+      continue;
+    }
+    // Empty content even after Pattern-1 paragraph extraction means the
+    // Notion page had no useful body at all. Don't pollute the cache —
+    // a "Panna Cotta" with zero ingredients shouldn't outscore the
+    // canonical "Breakfast Panna Cotta" in the kitchen's search.
+    if (!r.ingredients_en && !r.ingredients_ar) {
+      delete recipes[id];
+      droppedEmpty++;
+      console.log(`   [boho] drop empty Pattern-1: ${r.name}`);
       continue;
     }
     if (structuredNames.has(n)) {
@@ -223,6 +234,7 @@ async function buildBoho(cache) {
       console.log(`   [boho] keep unique Pattern-1: ${r.name}`);
     }
   }
+  if (droppedEmpty) console.log(`☕ Boho post-pass: dropped ${droppedEmpty} low_structure with 0 ingredients`);
   console.log(`\n☕ Boho post-pass: kept ${keptUnique} unique Pattern-1, dropped ${droppedDup} duplicates/no-name`);
   console.log(`☕ Boho final cache size: ${Object.keys(recipes).length}`);
   saveCache(cache);

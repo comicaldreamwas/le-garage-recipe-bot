@@ -1,6 +1,6 @@
 {
   "name": "le-garage-recipe-bot",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "description": "Telegram recipe bot for Le Garage restaurant kitchen — no-AI version",
   "main": "bot.js",
   "type": "commonjs",
