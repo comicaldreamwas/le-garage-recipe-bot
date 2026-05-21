@@ -3,70 +3,73 @@
 require('dotenv').config();
 
 const fs = require('fs');
-const path = require('path');
+const { Client } = require('@notionhq/client');
 
 const { fetchAllRecipes, fetchPageBlocks } = require('./lib/notion');
-const { parseRecipe, missingFields, missingCritical, isEmpty, isComplete, isReady, isUsable } = require('./lib/parser');
+const { parseRecipe, missingFields, missingCritical, isEmpty, isReady, isUsable } = require('./lib/parser');
 const { loadCache, saveCache } = require('./lib/cache');
 
 const CACHE_STALE_DAYS = 7;
 const NOTION_DELAY_MS = 250; // stay under Notion's 3 req/sec rate limit
 const REPORT_PATH = '/tmp/recipe-report.txt';
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 function isFresh(recipe) {
   if (!recipe?.cached_at) return false;
-  const age = Date.now() - new Date(recipe.cached_at).getTime();
-  return age < CACHE_STALE_DAYS * 24 * 60 * 60 * 1000;
+  return Date.now() - new Date(recipe.cached_at).getTime() < CACHE_STALE_DAYS * 24 * 60 * 60 * 1000;
 }
 
-/**
- * Normalize a Notion URL slug into a dedupe key. Strips the trailing
- * 32-char page ID, lowercases, removes punctuation. Two pages with
- * identical canonical slugs (one in El Gouna, one in Cairo) collapse
- * to the same key.
- *
- *   /MUSHROOM-SAUCE-2ad2c25e... → "mushroomsauce"
- *   /Mushroom-sauce-3fd2c25e... → "mushroomsauce"
- */
 function slugKey(url) {
   try {
-    const path = new URL(url).pathname.split('/').pop() || '';
-    const cleaned = path.replace(/-?[0-9a-f]{32}$/i, '');
-    return cleaned.toLowerCase().replace(/[^a-z0-9]/g, '');
-  } catch {
-    return '';
-  }
+    const p = new URL(url).pathname.split('/').pop() || '';
+    return p.replace(/-?[0-9a-f]{32}$/i, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  } catch { return ''; }
+}
+
+function parseArg(name, def) {
+  const arg = process.argv.find((a) => a.startsWith(`--${name}=`));
+  return arg ? arg.split('=')[1] : def;
 }
 
 async function main() {
-  console.log('🚀 Cache builder starting...\n');
-
   if (!process.env.NOTION_TOKEN) {
     console.error('❌ Missing env variable: NOTION_TOKEN');
     process.exit(1);
   }
+  const target = parseArg('restaurant', 'all');
+  if (!['le_garage', 'boho', 'all'].includes(target)) {
+    console.error(`❌ Unknown --restaurant=${target}; use le_garage | boho | all`);
+    process.exit(1);
+  }
 
+  console.log(`🚀 Cache builder starting — target=${target}\n`);
   const cache = loadCache();
-  const existingCount = Object.keys(cache.recipes).length;
-  console.log(`📦 Loaded existing cache: ${existingCount} recipes\n`);
+  console.log(`📦 Loaded existing cache: ${Object.keys(cache.le_garage.recipes).length} le_garage + ${Object.keys(cache.boho.recipes).length} boho recipes\n`);
+
+  if (target === 'le_garage' || target === 'all') await buildLeGarage(cache);
+  if (target === 'boho'      || target === 'all') await buildBoho(cache);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LE GARAGE  (existing logic, untouched except for cache shape)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function buildLeGarage(cache) {
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('🍔 Building Le Garage cache');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+  const recipes = cache.le_garage.recipes;
 
   console.log('🔍 Fetching recipe list from Notion...');
   const allPages = await fetchAllRecipes();
   console.log(`✅ Found ${allPages.length} pages in Notion\n`);
 
-  // ── Dedupe across databases ────────────────────────────────────────────
-  // El Gouna and Cairo databases often hold the same dish slug, but the
-  // two copies aren't always equally complete. Pre-parse every duplicate
-  // and pick the version with the most ingredient coverage (both EN+AR
-  // ingredients > one language > nothing). Ties prefer El Gouna.
+  // Dedupe groups by slug
   const slugGroups = new Map();
   for (const page of allPages) {
     const slug = slugKey(page.url);
-    if (!slug) { (slugGroups.get('') || slugGroups.set('', []).get('')).push(page); continue; }
     if (!slugGroups.has(slug)) slugGroups.set(slug, []);
     slugGroups.get(slug).push(page);
   }
@@ -75,13 +78,13 @@ async function main() {
   const duplicatesDropped = [];
 
   function scoreCandidate(parsed) {
-    const c = parsed.completeness || {};
+    const c = parsed?.completeness || {};
     return (c.has_ingredients_en ? 2 : 0)
          + (c.has_ingredients_ar ? 2 : 0)
-         + (c.has_prep_en        ? 1 : 0)
-         + (c.has_prep_ar        ? 1 : 0)
-         + (c.has_photo          ? 1 : 0)
-         + (c.has_video          ? 1 : 0);
+         + (c.has_prep_en ? 1 : 0)
+         + (c.has_prep_ar ? 1 : 0)
+         + (c.has_photo ? 1 : 0)
+         + (c.has_video ? 1 : 0);
   }
 
   for (const [slug, group] of slugGroups) {
@@ -89,7 +92,6 @@ async function main() {
       pages.push(...group);
       continue;
     }
-    // Multiple candidates — parse each, pick the most complete.
     console.log(`🔁 Resolving ${group.length} copies of '${slug}'…`);
     const scored = [];
     for (const g of group) {
@@ -98,19 +100,11 @@ async function main() {
         const blocks = await fetchPageBlocks(g.id);
         const parsed = await parseRecipe(g, blocks);
         scored.push({ page: g, parsed, score: scoreCandidate(parsed) });
-      } catch (err) {
+      } catch {
         scored.push({ page: g, parsed: null, score: -1 });
       }
     }
-    // Sort: most-recently-edited wins. Recency is the primary signal
-    // because the user maintains one database as canonical and lets
-    // the other lag — sometimes by months. The completeness score
-    // tends to favour El Gouna (it carries the structured Notion
-    // template with prep + storage sections) over Cairo (which often
-    // stores just the ingredient bullet list), so score-first
-    // dedupe systematically picks the stale copy even when Cairo was
-    // updated 3 months later. Score is kept only as final tiebreaker
-    // for the rare case where two copies share the same timestamp.
+    // Recency-primary (matches v3.0.2 behaviour)
     scored.sort((a, b) => {
       const ea = new Date(a.page.last_edited_time || 0).getTime();
       const eb = new Date(b.page.last_edited_time || 0).getTime();
@@ -119,63 +113,138 @@ async function main() {
     });
     const winner = scored[0];
     pages.push(winner.page);
-    // Pre-populate the parsed copy so the main loop can reuse it.
     winner._parsed = winner.parsed;
-    cache.recipes[winner.page.id] = {
+    recipes[winner.page.id] = {
       ...winner.parsed,
-      photo_file_id: cache.recipes[winner.page.id]?.photo_file_id || '',
-      video_file_id: cache.recipes[winner.page.id]?.video_file_id || '',
+      photo_file_id: recipes[winner.page.id]?.photo_file_id || '',
+      video_file_id: recipes[winner.page.id]?.video_file_id || '',
       cached_at: new Date().toISOString(),
     };
     for (let i = 1; i < scored.length; i++) {
       const loser = scored[i];
-      duplicatesDropped.push({
-        slug,
-        from: loser.page.database_label,
-        kept: winner.page.database_label,
-        score: loser.score,
-        kept_score: winner.score,
-        url: loser.page.url,
-      });
+      duplicatesDropped.push({ slug, from: loser.page.database_label, kept: winner.page.database_label, score: loser.score, kept_score: winner.score, url: loser.page.url });
     }
-    // Log the choice with editedness so the rebuild log shows whether
-    // the tiebreaker mattered.
     const wEdit = (winner.page.last_edited_time || '').slice(0, 10) || '?';
-    const loseInfo = scored.slice(1).map((l) => {
-      const lEdit = (l.page.last_edited_time || '').slice(0, 10) || '?';
-      return `${l.page.database_label}@${lEdit}`;
-    }).join(', ');
+    const loseInfo = scored.slice(1).map((l) => `${l.page.database_label}@${(l.page.last_edited_time || '').slice(0, 10) || '?'}`).join(', ');
     console.log(`   → kept ${winner.page.database_label}@${wEdit} (score=${winner.score}) over ${loseInfo}`);
   }
 
-  if (duplicatesDropped.length) {
-    console.log(`🔁 Deduplicated: ${duplicatesDropped.length} losers dropped`);
-    console.log('');
-  }
+  if (duplicatesDropped.length) console.log(`🔁 Deduplicated: ${duplicatesDropped.length} losers dropped\n`);
 
-  // Also drop entries from the cache that match a slug we no longer want
-  // (e.g. a Cairo copy that was previously cached before dedupe existed).
+  // Drop entries that no longer match a slug we want
   const validIds = new Set(pages.map((p) => p.id));
-  for (const id of Object.keys(cache.recipes)) {
-    if (!validIds.has(id)) delete cache.recipes[id];
-  }
+  for (const id of Object.keys(recipes)) if (!validIds.has(id)) delete recipes[id];
 
-  const processed = [];   // every recipe (complete + incomplete)
-  let skipped = 0;
-  let failed = 0;
-  let emptyCount = 0;
-  let completeCount = 0;
-  let incompleteCount = 0;
+  await processPages({
+    pages, recipes, cache,
+    restaurantSlot: 'le_garage',
+    label: '🍔 Le Garage',
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BOHO  (single-database, no cross-DB dedupe, low_structure skip baked into parser)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function buildBoho(cache) {
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('☕ Building Boho cache');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+  const BOHO_DB = process.env.NOTION_PARENT_BOHO;
+  if (!BOHO_DB) {
+    console.error('❌ NOTION_PARENT_BOHO not set in .env — skipping Boho build');
+    return;
+  }
+  const notion = new Client({ auth: process.env.NOTION_TOKEN });
+  const recipes = cache.boho.recipes;
+
+  console.log('🔍 Fetching Boho database rows...');
+  const rows = [];
+  let cursor;
+  do {
+    const r = await notion.databases.query({ database_id: BOHO_DB, page_size: 100, start_cursor: cursor });
+    rows.push(...r.results);
+    cursor = r.has_more ? r.next_cursor : undefined;
+  } while (cursor);
+  console.log(`✅ Found ${rows.length} pages\n`);
+
+  // Wrap raw Notion rows into the same shape fetchAllRecipes returns.
+  const pages = rows.map((p) => ({
+    id: p.id,
+    url: p.url,
+    properties: p.properties || {},
+    parent: p.parent || {},
+    database_id: BOHO_DB,
+    database_label: 'Boho',
+    last_edited_time: p.last_edited_time,
+  }));
+
+  // Drop entries that no longer match a Boho page (cleanup)
+  const validIds = new Set(pages.map((p) => p.id));
+  for (const id of Object.keys(recipes)) if (!validIds.has(id)) delete recipes[id];
+
+  await processPages({
+    pages, recipes, cache,
+    restaurantSlot: 'boho',
+    label: '☕ Boho Cafe',
+  });
+
+  // Post-pass: low_structure pages (Boho Pattern 1, paragraph-only)
+  // are kept ONLY if their dish name doesn't already appear in a
+  // structured Boho entry. This catches drafts and superseded copies
+  // ("Cheesecake mousse" draft vs "CHEESE CAKE MOUSSE" canonical)
+  // while keeping legitimately-unique items ("Whipped Cream",
+  // "Mashed Potatoes", marinades, stocks, etc.) accessible to the
+  // kitchen.
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const structuredNames = new Set();
+  for (const r of Object.values(recipes)) {
+    if (!r.low_structure && r.name) structuredNames.add(norm(r.name));
+  }
+  let droppedDup = 0;
+  let keptUnique = 0;
+  for (const [id, r] of Object.entries(recipes)) {
+    if (!r.low_structure) continue;
+    const n = norm(r.name);
+    // No-name drafts (Notion id as fallback name) → drop unconditionally.
+    if (!n || /^[0-9a-f]{20,}$/.test(n.replace(/\s/g, ''))) {
+      delete recipes[id];
+      droppedDup++;
+      console.log(`   [boho] drop noname: ${r.url}`);
+      continue;
+    }
+    if (structuredNames.has(n)) {
+      delete recipes[id];
+      droppedDup++;
+      console.log(`   [boho] drop duplicate-name: ${r.name}`);
+    } else {
+      keptUnique++;
+      console.log(`   [boho] keep unique Pattern-1: ${r.name}`);
+    }
+  }
+  console.log(`\n☕ Boho post-pass: kept ${keptUnique} unique Pattern-1, dropped ${droppedDup} duplicates/no-name`);
+  console.log(`☕ Boho final cache size: ${Object.keys(recipes).length}`);
+  saveCache(cache);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared per-page processing loop
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function processPages({ pages, recipes, cache, restaurantSlot, label }) {
+  let skipped = 0, failed = 0, emptyCount = 0, completeCount = 0, incompleteCount = 0, skippedLow = 0;
+  const processed = [];
 
   for (let i = 0; i < pages.length; i++) {
     const page = pages[i];
     const progress = `[${String(i + 1).padStart(3)}/${pages.length}]`;
     const slugLabel = page.url.split('/').pop().replace(/-[0-9a-f]{32}$/i, '');
 
-    if (isFresh(cache.recipes[page.id])) {
-      console.log(`${progress} ⏭  ${cache.recipes[page.id].name} (fresh)`);
+    if (isFresh(recipes[page.id])) {
+      console.log(`${progress} ⏭  ${recipes[page.id].name} (fresh)`);
       skipped++;
-      processed.push(cache.recipes[page.id]);
+      processed.push(recipes[page.id]);
       continue;
     }
 
@@ -184,54 +253,50 @@ async function main() {
       const topBlocks = await fetchPageBlocks(page.id);
       const parsed = await parseRecipe(page, topBlocks);
 
-      // Self-verify: re-parse the SAME blocks a second time and confirm
-      // the field hashes line up. Catches non-determinism in the parser
-      // (rare) and table-row ordering quirks. Cheap because no extra
-      // Notion fetch — we reuse the blocks we already pulled.
+      // Self-verify hashes (catches non-determinism)
       const reparsed = await parseRecipe(page, topBlocks);
       const driftFields = [];
       for (const k of ['name', 'ingredients_en', 'ingredients_ar', 'prep_en', 'prep_ar']) {
         if (parsed.hashes?.[k] !== reparsed.hashes?.[k]) driftFields.push(k);
       }
-      if (driftFields.length) {
-        console.warn(`         ⚠️  parser non-determinism on ${driftFields.join(',')} — keeping first parse`);
-      }
+      if (driftFields.length) console.warn(`         ⚠️  parser non-determinism on ${driftFields.join(',')} — keeping first parse`);
 
-      // Always store — even empty pages — so owner sees them in /broken.
-      const previous = cache.recipes[page.id] || {};
-      cache.recipes[page.id] = {
+      const previous = recipes[page.id] || {};
+      recipes[page.id] = {
         ...parsed,
         photo_file_id: previous.photo_file_id || '',
         video_file_id: previous.video_file_id || '',
         cached_at: new Date().toISOString(),
       };
-      const stored = cache.recipes[page.id];
+      const stored = recipes[page.id];
       processed.push(stored);
 
-      const media = (stored.photo_block_id ? '📷' : '· ') + (stored.video_block_id ? '🎥' : '· ');
-      if (isEmpty(stored)) {
-        console.log(`${progress} ⚠️  ${slugLabel} — empty (only title)`);
-        emptyCount++;
-      } else if (isReady(stored)) {
-        // Has ingredients in BOTH languages — the only thing the
-        // kitchen actually needs. prep / photo / video are bonuses.
-        const extra = [];
-        if (!stored.prep_en) extra.push('prep_en');
-        if (!stored.prep_ar) extra.push('prep_ar');
-        if (!stored.photo_block_id) extra.push('photo');
-        if (!stored.video_block_id) extra.push('video');
-        const tag = extra.length ? ` (no ${extra.join(', ')})` : '';
-        console.log(`${progress} ✅ ${media} ${stored.name}${tag}`);
-        completeCount++;
+      if (stored.low_structure) {
+        skippedLow++;
+        // Already logged by parser via [BOHO SKIP] line.
       } else {
-        const miss = missingCritical(stored).join(', ');
-        console.log(`${progress} ⚠️  ${media} ${stored.name} — missing: ${miss}`);
-        incompleteCount++;
+        const media = (stored.photo_block_id ? '📷' : '· ') + (stored.video_block_id ? '🎥' : '· ');
+        if (isEmpty(stored)) {
+          console.log(`${progress} ⚠️  ${slugLabel} — empty (only title)`);
+          emptyCount++;
+        } else if (isReady(stored)) {
+          const extra = [];
+          if (!stored.prep_en) extra.push('prep_en');
+          if (!stored.prep_ar) extra.push('prep_ar');
+          if (!stored.photo_block_id) extra.push('photo');
+          if (!stored.video_block_id) extra.push('video');
+          const tag = extra.length ? ` (no ${extra.join(', ')})` : '';
+          console.log(`${progress} ✅ ${media} ${stored.name}${tag}`);
+          completeCount++;
+        } else {
+          const miss = missingCritical(stored).join(', ');
+          console.log(`${progress} ⚠️  ${media} ${stored.name} — missing: ${miss}`);
+          incompleteCount++;
+        }
       }
 
-      cache.updated_at = new Date().toLocaleString('uk-UA', { timeZone: 'Africa/Cairo' });
+      cache[restaurantSlot].updated_at = new Date().toLocaleString('uk-UA', { timeZone: 'Africa/Cairo' });
       saveCache(cache);
-
     } catch (err) {
       console.error(`${progress} ❌ ${slugLabel} — ${err.message}`);
       failed++;
@@ -240,128 +305,72 @@ async function main() {
     await sleep(NOTION_DELAY_MS);
   }
 
-  cache.updated_at = new Date().toLocaleString('uk-UA', { timeZone: 'Africa/Cairo' });
+  cache[restaurantSlot].updated_at = new Date().toLocaleString('uk-UA', { timeZone: 'Africa/Cairo' });
   saveCache(cache);
 
-  writeReport(processed);
   printReport({
+    label,
     total: pages.length,
     complete: completeCount,
     incomplete: incompleteCount,
     empty: emptyCount,
     skipped,
+    skippedLow,
     failed,
-    cacheSize: Object.keys(cache.recipes).length,
+    cacheSize: Object.keys(recipes).length,
     processed,
   });
+
+  // Per-restaurant report
+  writeReport(processed, restaurantSlot);
 }
 
-function writeReport(processed) {
-  // Critical list = empty pages + pages missing one or both ingredient
-  // languages. Other gaps (prep/photo/video) are nice-to-have and not
-  // included in the punch list.
+function writeReport(processed, slot) {
   const broken = processed
-    .filter((r) => isEmpty(r) || missingCritical(r).length)
+    .filter((r) => !r.low_structure && (isEmpty(r) || missingCritical(r).length))
     .map((r) => ({ recipe: r, miss: isEmpty(r) ? ['ALL FIELDS'] : missingCritical(r) }));
-
-  const lines = ['=== RECIPES MISSING INGREDIENTS ===', `Generated: ${new Date().toISOString()}`, ''];
+  const lines = [`=== ${slot.toUpperCase()} — RECIPES MISSING INGREDIENTS ===`, `Generated: ${new Date().toISOString()}`, ''];
   for (const { recipe, miss } of broken) {
     lines.push(recipe.name || '(no name)');
     lines.push(`URL: ${recipe.url}`);
     lines.push(`Missing: ${miss.join(', ')}`);
     lines.push('---');
   }
-
-  try {
-    fs.writeFileSync(REPORT_PATH, lines.join('\n'), 'utf8');
-  } catch (err) {
-    console.warn(`⚠️  Could not write ${REPORT_PATH}: ${err.message}`);
-  }
+  try { fs.writeFileSync(`${REPORT_PATH}.${slot}`, lines.join('\n'), 'utf8'); }
+  catch (err) { console.warn(`⚠️  Could not write report: ${err.message}`); }
 }
 
-function printReport({ total, complete, incomplete, empty, skipped, failed, cacheSize, processed }) {
+function printReport({ label, total, complete, incomplete, empty, skipped, skippedLow, failed, cacheSize, processed }) {
   const counts = countMissing(processed);
   const pct = (n) => total ? Math.round((n / total) * 100) : 0;
+  const ready = processed.filter((r) => !r.low_structure && isReady(r)).length;
+  const usableOnlyOne = processed.filter((r) => !r.low_structure && isUsable(r) && !isReady(r)).length;
+  const missingAllIng = processed.filter((r) => !r.low_structure && !isUsable(r) && !isEmpty(r)).length;
 
-  // "Ready" = both ingredient languages present. The bot's actual
-  // success metric — prep/photo/video are optional.
-  const readyCount = processed.filter((r) => isReady(r)).length;
-  const usableOnlyOne = processed.filter((r) => isUsable(r) && !isReady(r)).length;
-  const missingAllIng = processed.filter((r) => !isUsable(r) && !isEmpty(r)).length;
-
-  console.log('\n═══════════════════════════════════');
-  console.log('📊 CACHE BUILD REPORT');
-  console.log('═══════════════════════════════════');
-  console.log(`Total recipes        : ${total}`);
-  console.log(`🍳 Ready (EN+AR ing) : ${readyCount} (${pct(readyCount)}%)`);
+  console.log(`\n═══════════════════════════════════`);
+  console.log(`📊 ${label} BUILD REPORT`);
+  console.log(`═══════════════════════════════════`);
+  console.log(`Total pages          : ${total}`);
+  console.log(`🍳 Ready (EN+AR ing) : ${ready} (${pct(ready)}%)`);
   console.log(`🟡 One language only : ${usableOnlyOne} (${pct(usableOnlyOne)}%)`);
   console.log(`🔴 Missing ingredients: ${missingAllIng} (${pct(missingAllIng)}%)`);
   console.log(`⚠️  Empty (title only): ${empty} (${pct(empty)}%)`);
-  console.log(`⏭  Skipped           : ${skipped}`);
+  console.log(`⏭  Skipped fresh     : ${skipped}`);
+  console.log(`⏭  Low-structure skip: ${skippedLow}`);
   console.log(`❌ Failed            : ${failed}`);
-  console.log(`📦 Cache total       : ${cacheSize}`);
-
-  if (counts.ingredients_en || counts.ingredients_ar || counts.allEmpty) {
-    console.log('\n🔴 CRITICAL — ingredients to add in Notion:');
-    if (counts.ingredients_en) console.log(`  - ${counts.ingredients_en} recipes missing ingredients_en`);
-    if (counts.ingredients_ar) console.log(`  - ${counts.ingredients_ar} recipes missing ingredients_ar`);
-    if (counts.allEmpty)       console.log(`  - ${counts.allEmpty} recipes are completely empty`);
-    console.log(`\nSee ${REPORT_PATH} for full list with Notion URLs`);
-  }
-
-  if (counts.prep_en || counts.prep_ar || counts.photo || counts.video) {
-    console.log('\n🟢 Nice-to-have gaps (not blocking):');
-    if (counts.prep_en) console.log(`  - ${counts.prep_en} recipes missing prep_en`);
-    if (counts.prep_ar) console.log(`  - ${counts.prep_ar} recipes missing prep_ar`);
-    if (counts.photo)   console.log(`  - ${counts.photo} recipes missing photo`);
-    if (counts.video)   console.log(`  - ${counts.video} recipes missing video`);
-  }
-
-  // Format breakdown — which Notion layout each recipe used.
-  const fmtCounts = {};
-  for (const r of processed) {
-    const f = r.format || 'empty';
-    fmtCounts[f] = (fmtCounts[f] || 0) + 1;
-  }
-  console.log('\nFormat breakdown:');
-  const order = ['toggle', 'toggle+mixed', 'table', 'list', 'mixed', 'paragraph', 'empty'];
-  const labels = {
-    toggle: 'Toggle-based',
-    'toggle+mixed': 'Toggle + table/list',
-    table: 'Header + table',
-    list: 'Header + list',
-    mixed: 'Header + list & table',
-    paragraph: 'Paragraph-only',
-    empty: 'No content detected',
-  };
-  for (const k of order) {
-    if (fmtCounts[k]) console.log(`  - ${labels[k]}: ${fmtCounts[k]} recipes`);
-  }
-
-  console.log('═══════════════════════════════════\n');
+  console.log(`📦 Cache slot total  : ${cacheSize}`);
+  console.log(`═══════════════════════════════════\n`);
 }
 
 function countMissing(processed) {
-  const counts = {
-    ingredients_en: 0, ingredients_ar: 0,
-    prep_en: 0, prep_ar: 0,
-    photo: 0, video: 0,
-    allEmpty: 0,
-  };
+  const counts = { ingredients_en: 0, ingredients_ar: 0, prep_en: 0, prep_ar: 0, photo: 0, video: 0, allEmpty: 0 };
   for (const r of processed) {
-    if (isEmpty(r)) {
-      counts.allEmpty++;
-      continue;
-    }
+    if (r.low_structure) continue;
+    if (isEmpty(r)) { counts.allEmpty++; continue; }
     const miss = missingFields(r);
-    for (const f of miss) {
-      if (counts[f] !== undefined) counts[f]++;
-    }
+    for (const f of miss) if (counts[f] !== undefined) counts[f]++;
   }
   return counts;
 }
 
-main().catch((err) => {
-  console.error('💥 Fatal error:', err);
-  process.exit(1);
-});
+main().catch((err) => { console.error('💥 Fatal error:', err); process.exit(1); });
