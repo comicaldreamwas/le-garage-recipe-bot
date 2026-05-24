@@ -20,6 +20,26 @@ for (const key of required) {
   if (!process.env[key]) { console.error(`❌ Missing env variable: ${key}`); process.exit(1); }
 }
 
+// ── Restaurant mode ──────────────────────────────────────────────────────────
+// RESTAURANT_MODE:
+//   'multi'      (default) — bot lets each Telegram user pick a
+//                            restaurant; serves both le_garage and boho
+//                            slots out of the shared cache.
+//   'le_garage'  — single-restaurant mode, always le_garage. No picker.
+//   'boho'       — single-restaurant mode, always boho. No picker.
+//
+// Set in .env.boho for a dedicated Boho bot process. Le Garage's
+// existing .env leaves it unset → defaults to 'multi' so legacy
+// behaviour is preserved.
+const MODE = (process.env.RESTAURANT_MODE || 'multi').toLowerCase();
+if (!['multi', 'le_garage', 'boho'].includes(MODE)) {
+  console.error(`❌ Invalid RESTAURANT_MODE=${MODE}; expected multi|le_garage|boho`);
+  process.exit(1);
+}
+const SINGLE_MODE = MODE !== 'multi';
+const FIXED_RESTAURANT = SINGLE_MODE ? MODE : null;
+console.log(`🏪 Restaurant mode: ${MODE}`);
+
 // ── Whitelist ────────────────────────────────────────────────────────────────
 const allowedIds = (process.env.ALLOWED_USER_IDS || '')
   .split(',').map((s) => s.trim()).filter(Boolean).map(Number).filter((n) => Number.isFinite(n));
@@ -84,6 +104,14 @@ function restaurantKeyboard() {
 }
 
 bot.start(async (ctx) => {
+  if (SINGLE_MODE) {
+    const label = FIXED_RESTAURANT === 'le_garage' ? '🍔 Le Garage' : '☕ Boho Cafe';
+    await ctx.reply(
+      `👋 <b>Welcome to ${label} recipe bot!</b>\n\nType any dish name to search — English or Arabic.\n\n<b>Examples:</b>\n• <code>caesar salad</code>\n• <code>صلصة الترفل</code>`,
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
   const userId = ctx.from.id;
   const current = getUserRestaurant(userId);
   if (current) {
@@ -101,6 +129,14 @@ bot.start(async (ctx) => {
 });
 
 bot.command('restaurant', async (ctx) => {
+  if (SINGLE_MODE) {
+    const label = FIXED_RESTAURANT === 'le_garage' ? '🍔 Le Garage' : '☕ Boho Cafe';
+    await ctx.reply(
+      `This bot serves <b>${label}</b> only.\nJust type a dish name.`,
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
   const userId = ctx.from.id;
   const current = getUserRestaurant(userId);
   const label = current === 'le_garage' ? '🍔 Le Garage'
@@ -113,6 +149,7 @@ bot.command('restaurant', async (ctx) => {
 });
 
 bot.action(/^select_(le_garage|boho)$/, async (ctx) => {
+  if (SINGLE_MODE) { await ctx.answerCbQuery('Single-restaurant bot'); return; }
   const restaurant = ctx.match[1];
   const userId = ctx.from.id;
   setUserRestaurant(userId, restaurant);
@@ -242,13 +279,11 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // Existing Le Garage users who never explicitly picked a restaurant
-  // (their first message after the v4 deploy) get auto-defaulted to
-  // le_garage so the workflow doesn't break. The recipe footer
-  // includes a "Tip: /restaurant" pointer so they can discover Boho.
-  // Brand-new users get the picker via /start (which Telegram clients
-  // send the first time they open the bot).
-  const restaurant = getOrDefaultRestaurant(userId);
+  // Single-restaurant bots skip user-preference lookup entirely and
+  // serve everyone from the fixed slot. In multi mode, existing users
+  // who never explicitly picked a restaurant get auto-defaulted to
+  // le_garage so the v4 rollout didn't interrupt anyone's workflow.
+  const restaurant = SINGLE_MODE ? FIXED_RESTAURANT : getOrDefaultRestaurant(userId);
   await handleSearch(ctx, query, restaurant);
 });
 
@@ -278,7 +313,7 @@ async function handleSearch(ctx, query, restaurant) {
       return;
     }
 
-    const text = formatRecipe(match.recipe, { restaurant });
+    const text = formatRecipe(match.recipe, { restaurant, singleMode: SINGLE_MODE });
     await sendRecipe(bot, ctx.chat.id, text, match.recipe, match.id, cache);
     console.log(`   ✅ [${restaurant}] ${match.recipe.name} (score=${match.score} kw=${match.keywords.join(',')}) (${Date.now() - startTime}ms)`);
 
