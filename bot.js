@@ -1,6 +1,11 @@
 'use strict';
 
-require('dotenv').config();
+// DOTENV_PATH lets the PM2 ecosystem point each process at its own env file
+// (.env for Le Garage / multi, .env.boho for the Boho-only process). PM2's
+// ecosystem options have no `env_file` directive — what looked like one was
+// silently ignored, so both processes loaded the same .env. Routing through
+// dotenv's `path` option is the supported way.
+require('dotenv').config({ path: process.env.DOTENV_PATH || '.env' });
 
 const fs = require('fs');
 const { Telegraf, Markup } = require('telegraf');

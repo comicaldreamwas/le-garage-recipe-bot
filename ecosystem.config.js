@@ -23,7 +23,10 @@ module.exports = {
       name: 'recipe-bot',
       script: 'bot.js',
       cwd: '/opt/le-garage-recipe-bot',
-      env_file: '.env',           // Le Garage — RESTAURANT_MODE unset or 'multi'
+      // PM2 has no `env_file` directive — bot.js reads DOTENV_PATH and feeds
+      // it to dotenv. Default '.env' = Le Garage (RESTAURANT_MODE unset or
+      // 'multi'). Secrets stay in the gitignored .env file.
+      env: { DOTENV_PATH: '/opt/le-garage-recipe-bot/.env' },
       out_file: '/root/.pm2/logs/recipe-bot-out.log',
       error_file: '/root/.pm2/logs/recipe-bot-error.log',
       max_memory_restart: '300M',
@@ -32,7 +35,7 @@ module.exports = {
       name: 'recipe-bot-boho',
       script: 'bot.js',
       cwd: '/opt/le-garage-recipe-bot',
-      env_file: '.env.boho',      // RESTAURANT_MODE=boho + Boho bot token
+      env: { DOTENV_PATH: '/opt/le-garage-recipe-bot/.env.boho' },
       out_file: '/root/.pm2/logs/recipe-bot-boho-out.log',
       error_file: '/root/.pm2/logs/recipe-bot-boho-error.log',
       max_memory_restart: '300M',
