@@ -253,10 +253,18 @@ async function processPages({ pages, recipes, cache, restaurantSlot, label }) {
     const progress = `[${String(i + 1).padStart(3)}/${pages.length}]`;
     const slugLabel = page.url.split('/').pop().replace(/-[0-9a-f]{32}$/i, '');
 
-    if (isFresh(recipes[page.id])) {
-      console.log(`${progress} ⏭  ${recipes[page.id].name} (fresh)`);
+    // Skip only if our cache is BOTH young (<7d) AND newer than the page's
+    // last Notion edit. Previously we skipped any entry cached <7d ago,
+    // which silently dropped edits made within that window — the reason
+    // Notion changes didn't surface until the weekly full rebuild. Now an
+    // edit (last_edited_time > cached_at) always forces a re-fetch.
+    const cachedRec = recipes[page.id];
+    const editedSinceCache = cachedRec?.cached_at && page.last_edited_time &&
+      new Date(page.last_edited_time).getTime() > new Date(cachedRec.cached_at).getTime();
+    if (cachedRec && isFresh(cachedRec) && !editedSinceCache) {
+      console.log(`${progress} ⏭  ${cachedRec.name} (fresh)`);
       skipped++;
-      processed.push(recipes[page.id]);
+      processed.push(cachedRec);
       continue;
     }
 
