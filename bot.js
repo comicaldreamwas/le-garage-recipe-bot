@@ -11,6 +11,7 @@ const fs = require('fs');
 const { Telegraf, Markup } = require('telegraf');
 const { loadCache, watchCache, getRestaurantRecipes, getSearchableRecipes, RESTAURANTS } = require('./lib/cache');
 const { searchRecipe, suggestRecipes } = require('./lib/search');
+const { searchArabic, arabicNameOf, hasArabic } = require('./lib/arabicSearch');
 const { formatRecipe, formatSuggestions, formatBrokenReport, NOT_FOUND_MESSAGE } = require('./lib/format');
 const { sendRecipe } = require('./lib/telegram');
 const { verifyInBackground } = require('./lib/verify');
@@ -202,6 +203,25 @@ bot.action(/^select_(le_garage|boho)$/, async (ctx) => {
   }
 });
 
+// A "did you mean" name button was tapped → serve that exact recipe.
+bot.action(/^r_([0-9a-f]{32})$/, async (ctx) => {
+  const userId = ctx.from.id;
+  if (!isAllowed(userId)) { await ctx.answerCbQuery('🚫'); return; }
+  const restaurant = SINGLE_MODE ? FIXED_RESTAURANT : getOrDefaultRestaurant(userId);
+  const id = redashId(ctx.match[1]);
+  const recipe = searchable[restaurant]?.[id];
+  if (!recipe) { await ctx.answerCbQuery('Try searching again 🔄'); return; }
+  await ctx.answerCbQuery();
+  try {
+    const text = formatRecipe(recipe, { restaurant, singleMode: SINGLE_MODE });
+    await sendRecipe(bot, ctx.chat.id, text, recipe, id, cache);
+    console.log(`   ✅ [${restaurant}] (picked) ${recipe.name}`);
+    verifyInBackground(bot, { ...recipe, source_page_id: id }, '(picked)', userId);
+  } catch (err) {
+    console.error(`   💥 pick error: ${err.message}`);
+  }
+});
+
 bot.help(async (ctx) => {
   await ctx.reply(
     '📖 <b>How to use</b>\n\n' +
@@ -313,6 +333,50 @@ bot.on('text', async (ctx) => {
   await handleSearch(ctx, query, restaurant);
 });
 
+const SUGGEST_HEADER =
+  '🔍 <b>Можливо, ви мали на увазі / هل تقصد:</b>\n' +
+  '<i>Натисніть назву / اضغط على الاسم 👇</i>';
+
+// 32-hex Notion id (callback-safe) → dashed cache key.
+function redashId(id) {
+  return id.includes('-') ? id : id.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
+}
+
+// Merge candidate sources into a deduped, ordered list for the picker:
+// Arabic-name hits first (the worker typed Arabic), then English-slug
+// suggestions, then the weak English fallback. Capped at 6.
+function gatherCandidates({ query, recipes, restaurant, arabic, weak }) {
+  const seen = new Set();
+  const out = [];
+  const add = (id, recipe) => {
+    if (id && recipe && !seen.has(id)) { seen.add(id); out.push({ id, recipe }); }
+  };
+  for (const c of (arabic?.candidates || [])) add(c.id, c.recipe);
+  for (const s of suggestRecipes(query, recipes, 5, restaurant)) add(s.id, s.recipe);
+  if (weak) add(weak.id, weak.recipe);
+  return out.slice(0, 6);
+}
+
+// Inline keyboard of candidate NAMES. When the query was Arabic we lead with
+// the Arabic name so the worker recognises it. callback_data = r_<id32>.
+function suggestionKeyboard(cands, arabicQuery) {
+  const rows = cands.map((c) => {
+    const ar = arabicNameOf(c.recipe);
+    const label = arabicQuery && ar
+      ? `${ar} — ${c.recipe.name}`
+      : (ar ? `${c.recipe.name} — ${ar}` : c.recipe.name);
+    return [{ text: label.slice(0, 60), callback_data: 'r_' + c.id.replace(/-/g, '') }];
+  });
+  return { reply_markup: { inline_keyboard: rows } };
+}
+
+async function serveMatch(ctx, restaurant, recipe, id, query, userId, startTime) {
+  const text = formatRecipe(recipe, { restaurant, singleMode: SINGLE_MODE });
+  await sendRecipe(bot, ctx.chat.id, text, recipe, id, cache);
+  console.log(`   ✅ [${restaurant}] ${recipe.name} (${Date.now() - startTime}ms)`);
+  verifyInBackground(bot, { ...recipe, source_page_id: id }, query, userId);
+}
+
 async function handleSearch(ctx, query, restaurant) {
   const startTime = Date.now();
   const userId = ctx.from.id;
@@ -328,24 +392,42 @@ async function handleSearch(ctx, query, restaurant) {
   const statusMsg = await ctx.reply('⏳ Searching... / جاري البحث...');
   try {
     const match = searchRecipe(query, recipes, restaurant);
+    // Confident = the English/dictionary path met its own keyword threshold.
+    const confident = match && match.score >= Math.min(match.keywords.length, 2);
+    // Arabic-name search (drink names + translated dish names). Precise full-
+    // name matches here beat the English path, which can latch onto a single
+    // shared keyword (e.g. "ميلك شيك شوكولاتة" → any chocolate dish).
+    const arabic = hasArabic(query) ? searchArabic(query, recipes) : { candidates: [], confident: false };
     try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch {}
 
-    if (!match) {
-      const suggestions = suggestRecipes(query, recipes, 5, restaurant);
-      if (suggestions.length > 0) {
-        await ctx.reply(formatSuggestions(suggestions), { parse_mode: 'HTML' });
-      } else {
-        await ctx.reply(NOT_FOUND_MESSAGE);
-      }
-      console.log(`   ❌ Not found in ${restaurant} (${Date.now() - startTime}ms)`);
+    // 1. Confident Arabic NAME match wins first for Arabic queries.
+    if (arabic.confident) {
+      const top = arabic.candidates[0];
+      await serveMatch(ctx, restaurant, top.recipe, top.id, query, userId, startTime);
       return;
     }
 
-    const text = formatRecipe(match.recipe, { restaurant, singleMode: SINGLE_MODE });
-    await sendRecipe(bot, ctx.chat.id, text, match.recipe, match.id, cache);
-    console.log(`   ✅ [${restaurant}] ${match.recipe.name} (score=${match.score} kw=${match.keywords.join(',')}) (${Date.now() - startTime}ms)`);
+    // 2. Confident English / curated-dictionary match → serve.
+    if (confident) {
+      await serveMatch(ctx, restaurant, match.recipe, match.id, query, userId, startTime);
+      return;
+    }
 
-    verifyInBackground(bot, { ...match.recipe, source_page_id: match.id }, query, userId);
+    // 3. Not sure → offer clickable name options (the "did you mean" flow).
+    const cands = gatherCandidates({ query, recipes, restaurant, arabic, weak: match });
+    if (cands.length === 1) {
+      await serveMatch(ctx, restaurant, cands[0].recipe, cands[0].id, query, userId, startTime);
+      return;
+    }
+    if (cands.length > 1) {
+      await ctx.reply(SUGGEST_HEADER, { parse_mode: 'HTML', ...suggestionKeyboard(cands, hasArabic(query)) });
+      console.log(`   🔀 Offered ${cands.length} options in ${restaurant} (${Date.now() - startTime}ms)`);
+      return;
+    }
+
+    // 4. Nothing relevant.
+    await ctx.reply(NOT_FOUND_MESSAGE);
+    console.log(`   ❌ Not found in ${restaurant} (${Date.now() - startTime}ms)`);
   } catch (err) {
     console.error(`   💥 Error: ${err.message}`);
     try { await ctx.reply('😔 Something went wrong. Please try again.\nحدث خطأ ما، يرجى المحاولة مرة أخرى.'); } catch {}
