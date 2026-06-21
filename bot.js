@@ -9,7 +9,7 @@ require('dotenv').config({ path: process.env.DOTENV_PATH || '.env' });
 
 const fs = require('fs');
 const { Telegraf, Markup } = require('telegraf');
-const { loadCache, watchCache, getRestaurantRecipes, RESTAURANTS } = require('./lib/cache');
+const { loadCache, watchCache, getRestaurantRecipes, getSearchableRecipes, RESTAURANTS } = require('./lib/cache');
 const { searchRecipe, suggestRecipes } = require('./lib/search');
 const { formatRecipe, formatSuggestions, formatBrokenReport, NOT_FOUND_MESSAGE } = require('./lib/format');
 const { sendRecipe } = require('./lib/telegram');
@@ -60,16 +60,35 @@ function esc(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// ── Cache (v4 multi-restaurant) ──────────────────────────────────────────────
+// ── Cache (v4.2 — food + drinks) ─────────────────────────────────────────────
 let cache = loadCache();
+
+// Memoised per-restaurant SEARCH view: food slot merged with its drink
+// slot(s). Stable object identity per cache version so the auto-dictionary
+// only rebuilds on an actual cache reload, not on every query. Used for all
+// user-facing search; admin/maintenance paths keep the food-only view.
+let searchable = {};
+function rebuildSearchable() {
+  searchable = {};
+  for (const r of RESTAURANTS) searchable[r] = getSearchableRecipes(cache, r);
+}
+rebuildSearchable();
+
 function refreshAutoTermsAll() {
-  for (const r of RESTAURANTS) rebuildAutoTerms(getRestaurantRecipes(cache, r), r);
+  for (const r of RESTAURANTS) rebuildAutoTerms(searchable[r], r);
 }
 refreshAutoTermsAll();
+function drinkCounts() {
+  const lgd = Object.keys(getRestaurantRecipes(cache, 'le_garage_drinks')).length
+            + Object.keys(getRestaurantRecipes(cache, 'le_garage_drinks_cairo')).length;
+  const bhd = Object.keys(getRestaurantRecipes(cache, 'boho_drinks')).length;
+  return { lgd, bhd };
+}
 function logCacheSummary() {
   const lg = Object.keys(getRestaurantRecipes(cache, 'le_garage')).length;
   const bh = Object.keys(getRestaurantRecipes(cache, 'boho')).length;
-  console.log(`📦 Cache loaded: ${lg} le_garage + ${bh} boho`);
+  const { lgd, bhd } = drinkCounts();
+  console.log(`📦 Cache loaded: ${lg} le_garage (+${lgd} drinks) + ${bh} boho (+${bhd} drinks)`);
   for (const r of RESTAURANTS) {
     const s = autoStats(r);
     console.log(`🧠 Auto-terms[${r}]: ${s.words} words, ${s.phrases} phrases`);
@@ -79,10 +98,12 @@ logCacheSummary();
 
 watchCache((fresh) => {
   cache = fresh;
+  rebuildSearchable();
   refreshAutoTermsAll();
   const lg = Object.keys(getRestaurantRecipes(cache, 'le_garage')).length;
   const bh = Object.keys(getRestaurantRecipes(cache, 'boho')).length;
-  console.log(`🔄 Cache reloaded: ${lg} le_garage + ${bh} boho`);
+  const { lgd, bhd } = drinkCounts();
+  console.log(`🔄 Cache reloaded: ${lg} le_garage (+${lgd} drinks) + ${bh} boho (+${bhd} drinks)`);
 });
 
 // ── Pending query (used when a brand-new user types a dish BEFORE
@@ -219,9 +240,9 @@ bot.command('verify', async (ctx) => {
     await ctx.reply('Usage:\n<code>/verify &lt;recipe name&gt;</code>\n<code>/verify --all</code>', { parse_mode: 'HTML' });
     return;
   }
-  // Search current admin's selected restaurant
+  // Search current admin's selected restaurant (food + drinks)
   const restaurant = getOrDefaultRestaurant(ctx.from.id);
-  const recipes = getRestaurantRecipes(cache, restaurant);
+  const recipes = searchable[restaurant];
   const match = searchRecipe(arg, recipes, restaurant);
   if (!match) { await ctx.reply(`🔍 No cached ${restaurant} recipe matched "${esc(arg)}".`, { parse_mode: 'HTML' }); return; }
   const cached = match.recipe;
@@ -295,7 +316,9 @@ bot.on('text', async (ctx) => {
 async function handleSearch(ctx, query, restaurant) {
   const startTime = Date.now();
   const userId = ctx.from.id;
-  const recipes = getRestaurantRecipes(cache, restaurant);
+  // Food + this restaurant's drinks, merged. Cross-restaurant isolation is
+  // preserved: searchable[le_garage] never contains Boho rows and vice versa.
+  const recipes = searchable[restaurant];
 
   if (!recipes || Object.keys(recipes).length === 0) {
     await ctx.reply(`❌ ${restaurant} cache is empty. Tell the admin to run cache-builder.`);
@@ -372,8 +395,9 @@ async function startupVerificationSample() {
 bot.telegram.getMe().then(async (info) => {
   const lg = Object.keys(getRestaurantRecipes(cache, 'le_garage')).length;
   const bh = Object.keys(getRestaurantRecipes(cache, 'boho')).length;
+  const { lgd, bhd } = drinkCounts();
   console.log(`\n✅ Bot is running on @${info.username}`);
-  console.log(`   Cache: ${lg} le_garage + ${bh} boho`);
+  console.log(`   Cache: ${lg} le_garage (+${lgd} drinks) + ${bh} boho (+${bhd} drinks)`);
   console.log(`   Whitelist: ${allowedIds.length === 0 ? 'open' : allowedIds.length + ' users'}\n`);
   startupVerificationSample().catch(() => {});
 }).catch((err) => {
