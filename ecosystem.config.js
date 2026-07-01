@@ -40,5 +40,16 @@ module.exports = {
       error_file: '/root/.pm2/logs/recipe-bot-boho-error.log',
       max_memory_restart: '300M',
     },
+    {
+      // Near-instant Notion → cache sync. Polls every DB for changed pages and
+      // pushes them into recipes-cache.json; both bots reload via watchCache.
+      name: 'recipe-sync',
+      script: 'scripts/watch-notion.js',
+      cwd: '/opt/le-garage-recipe-bot',
+      env: { DOTENV_PATH: '/opt/le-garage-recipe-bot/.env', SYNC_POLL_MS: '30000' },
+      out_file: '/root/.pm2/logs/recipe-sync-out.log',
+      error_file: '/root/.pm2/logs/recipe-sync-error.log',
+      max_memory_restart: '200M',
+    },
   ],
 };

@@ -391,43 +391,45 @@ async function handleSearch(ctx, query, restaurant) {
 
   const statusMsg = await ctx.reply('⏳ Searching... / جاري البحث...');
   try {
+    const arabicQ = hasArabic(query);
     const match = searchRecipe(query, recipes, restaurant);
     // Confident = the English/dictionary path met its own keyword threshold.
-    const confident = match && match.score >= Math.min(match.keywords.length, 2);
-    // Arabic-name search (drink names + translated dish names). Precise full-
-    // name matches here beat the English path, which can latch onto a single
-    // shared keyword (e.g. "ميلك شيك شوكولاتة" → any chocolate dish).
-    const arabic = hasArabic(query) ? searchArabic(query, recipes) : { candidates: [], confident: false };
+    const enConfident = match && match.score >= Math.min(match.keywords.length, 2);
+    // IDF-ranked Arabic NAME search — authoritative for Arabic queries so the
+    // English dictionary can't hijack them via a single generic keyword
+    // (برجر → "Burger Plate Preparation", بطاطس → "Sweet Potato Fries").
+    const arabic = arabicQ ? searchArabic(query, recipes) : { candidates: [], confident: false };
     try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch {}
 
-    // 1. Confident Arabic NAME match wins first for Arabic queries.
-    if (arabic.confident) {
-      const top = arabic.candidates[0];
-      await serveMatch(ctx, restaurant, top.recipe, top.id, query, userId, startTime);
+    const offerOrServe = async (cands) => {
+      if (cands.length === 1) {
+        await serveMatch(ctx, restaurant, cands[0].recipe, cands[0].id, query, userId, startTime);
+      } else if (cands.length > 1) {
+        await ctx.reply(SUGGEST_HEADER, { parse_mode: 'HTML', ...suggestionKeyboard(cands, arabicQ) });
+        console.log(`   🔀 Offered ${cands.length} options in ${restaurant} (${Date.now() - startTime}ms)`);
+      } else {
+        await ctx.reply(NOT_FOUND_MESSAGE);
+        console.log(`   ❌ Not found in ${restaurant} (${Date.now() - startTime}ms)`);
+      }
+    };
+
+    // Arabic query that produced NAME matches → the IDF engine decides.
+    if (arabicQ && arabic.candidates.length) {
+      if (arabic.confident) {
+        const top = arabic.candidates[0];
+        await serveMatch(ctx, restaurant, top.recipe, top.id, query, userId, startTime);
+        return;
+      }
+      await offerOrServe(gatherCandidates({ query, recipes, restaurant, arabic, weak: null }));
       return;
     }
 
-    // 2. Confident English / curated-dictionary match → serve.
-    if (confident) {
+    // English query (or Arabic with no name match) → curated dictionary path.
+    if (enConfident) {
       await serveMatch(ctx, restaurant, match.recipe, match.id, query, userId, startTime);
       return;
     }
-
-    // 3. Not sure → offer clickable name options (the "did you mean" flow).
-    const cands = gatherCandidates({ query, recipes, restaurant, arabic, weak: match });
-    if (cands.length === 1) {
-      await serveMatch(ctx, restaurant, cands[0].recipe, cands[0].id, query, userId, startTime);
-      return;
-    }
-    if (cands.length > 1) {
-      await ctx.reply(SUGGEST_HEADER, { parse_mode: 'HTML', ...suggestionKeyboard(cands, hasArabic(query)) });
-      console.log(`   🔀 Offered ${cands.length} options in ${restaurant} (${Date.now() - startTime}ms)`);
-      return;
-    }
-
-    // 4. Nothing relevant.
-    await ctx.reply(NOT_FOUND_MESSAGE);
-    console.log(`   ❌ Not found in ${restaurant} (${Date.now() - startTime}ms)`);
+    await offerOrServe(gatherCandidates({ query, recipes, restaurant, arabic, weak: match }));
   } catch (err) {
     console.error(`   💥 Error: ${err.message}`);
     try { await ctx.reply('😔 Something went wrong. Please try again.\nحدث خطأ ما، يرجى المحاولة مرة أخرى.'); } catch {}

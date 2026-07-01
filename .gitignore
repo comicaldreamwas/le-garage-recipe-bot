@@ -28,3 +28,6 @@ cache.log
 .claude/
 .vscode/
 .idea/
+
+# Notion sync watermark (runtime state)
+.notion-sync-state.json
