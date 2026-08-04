@@ -27,8 +27,44 @@ node bot.js
 | `NOTION_TOKEN` | ✅ | Notion integration token (`ntn_...`) |
 | `NOTION_PARENT_EL_GOUNA` | optional | El Gouna database ID (default baked in) |
 | `NOTION_PARENT_CAIRO` | optional | Cairo database ID (default baked in) |
-| `ALLOWED_USER_IDS` | optional | Comma-separated Telegram IDs. Empty = open access |
-| `ADMIN_USER_ID` | optional | Receives runtime drift alerts and unlocks `/verify` |
+| `ALLOWED_USER_IDS` | deprecated | Old whitelist. Imported into `allowed-users.json` once at startup, then ignored — see [Staff access](#staff-access) |
+| `ADMIN_USER_ID` | optional | Receives drift alerts, unlocks `/verify`, and manages the staff whitelist. Defaults to the owner id in `bot.js` — set only to hand the bot to a different admin |
+| `ADMIN_USERNAME` | optional | Handle shown to blocked users. Defaults to the owner handle in `bot.js` |
+
+---
+
+## Staff access
+
+Only staff on the whitelist get recipes. The list lives in `allowed-users.json`
+next to the cache — gitignored, so a deploy never overwrites it — and is managed
+entirely from Telegram by `ADMIN_USER_ID`.
+
+| Command | Result |
+|---|---|
+| `/users` | The roster: name, id, when added, when last seen |
+| `/adduser <id> <name>` | Grant access, e.g. `/adduser 583920144 Ahmed (kitchen)` |
+| `/deluser <id \| @username \| name>` | Revoke access |
+| `/import` | One-off: seed the list from everyone who used the bot before it was closed |
+| `/whoami` | Anyone's own Telegram id |
+
+**Onboarding.** A new cook writes to the bot, gets `🚫 Access closed` with their
+id, and forwards it to the manager, who runs `/adduser`.
+
+**Offboarding.** `/deluser` takes effect on that person's very next message —
+no restart, no deploy, and it propagates to the other bot process within one
+message because both re-read the file when it changes. Recipes already sent
+stay in their Telegram history; the bot cannot retract those.
+
+**Scoped per restaurant.** `allowed-users.json` holds a `le_garage` and a `boho`
+section, and each process only reads and writes its own — set by
+`RESTAURANT_MODE`. Boho staff cannot use the Le Garage bot, and revoking someone
+in one does not touch the other.
+
+**The roster starts empty**, so on the first deploy everyone except the admin is
+locked out at once and re-admitted deliberately via `/adduser`. `/import` exists
+to carry the old open-access users over instead, but it was deliberately *not*
+run here. Every blocked attempt is logged with id and handle, so
+`pm2 logs recipe-bot-boho` doubles as the list of people waiting to be added.
 
 ---
 

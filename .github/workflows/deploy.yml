@@ -19,5 +19,10 @@ jobs:
             cd /opt/le-garage-recipe-bot
             git pull origin master
             npm install --omit=dev
-            pm2 restart recipe-bot
+            # Every process defined in ecosystem.config.js, not just recipe-bot:
+            # recipe-bot-boho and recipe-sync run the same code and used to keep
+            # running the pre-deploy version indefinitely. startOrReload also
+            # starts anything that isn't registered on the box yet.
+            pm2 startOrReload ecosystem.config.js --update-env
+            pm2 save
             echo "✅ Deploy complete"
