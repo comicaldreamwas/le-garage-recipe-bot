@@ -6,7 +6,9 @@
   "type": "commonjs",
   "scripts": {
     "start": "node bot.js",
-    "build-cache": "node cache-builder.js"
+    "build-cache": "node cache-builder.js",
+    "test": "node tests/access-tests.js",
+    "test:search": "node tests/search-tests.js"
   },
   "dependencies": {
     "@notionhq/client": "^2.2.15",

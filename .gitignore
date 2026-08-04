@@ -12,6 +12,12 @@ recipes-cache.backup.*.json
 user-preferences.json
 user-preferences.json.tmp
 
+# Staff whitelist (managed from Telegram via /adduser · /deluser).
+# Must stay out of git: `git pull` on deploy would otherwise overwrite the
+# live roster, silently restoring access to people who were revoked.
+allowed-users.json
+allowed-users.json.tmp
+
 # Dependencies
 node_modules/
 

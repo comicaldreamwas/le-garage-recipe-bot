@@ -18,7 +18,8 @@ const { verifyInBackground } = require('./lib/verify');
 const { fetchPageBlocks } = require('./lib/notion');
 const { parseRecipe, hashRecipeFields } = require('./lib/parser');
 const { rebuildAutoTerms, autoStats } = require('./lib/autoTerms');
-const { getUserRestaurant, setUserRestaurant, getOrDefaultRestaurant, updateLastActive } = require('./lib/preferences');
+const { getUserRestaurant, setUserRestaurant, getOrDefaultRestaurant, updateLastActive, listUsers: listPrefUsers } = require('./lib/preferences');
+const access = require('./lib/access');
 
 // ── Validate env ─────────────────────────────────────────────────────────────
 const required = ['TELEGRAM_BOT_TOKEN', 'NOTION_TOKEN'];
@@ -47,15 +48,66 @@ const FIXED_RESTAURANT = SINGLE_MODE ? MODE : null;
 console.log(`🏪 Restaurant mode: ${MODE}`);
 
 // ── Whitelist ────────────────────────────────────────────────────────────────
-const allowedIds = (process.env.ALLOWED_USER_IDS || '')
-  .split(',').map((s) => s.trim()).filter(Boolean).map(Number).filter((n) => Number.isFinite(n));
-function isAllowed(userId) {
-  if (allowedIds.length === 0) return true;
-  return allowedIds.includes(userId);
-}
+// Staff are granted and revoked from Telegram (/adduser, /deluser) against
+// allowed-users.json — no SSH, no PM2 restart, and a revoked employee stops
+// getting recipes on their very next message. See lib/access.js.
+//
+// Enforcement hangs off ADMIN_USER_ID: without an admin nobody could run
+// /adduser, so an empty whitelist would be an unrecoverable lockout fixable
+// only over SSH. In that case we shout in the log and stay open rather than
+// brick a working bot.
+// Baked in rather than left to the env so a plain `git push` closes the bot on
+// both processes — .env and .env.boho live only on the VPS and would each need
+// editing by hand. ADMIN_USER_ID still overrides it.
+const DEFAULT_ADMIN_ID = '923918835';        // @Anton_chevzhyk
+const DEFAULT_ADMIN_CONTACT = 'Anton_chevzhyk';
+
+const ADMIN_ID = String(process.env.ADMIN_USER_ID || DEFAULT_ADMIN_ID).trim();
+const ADMIN_CONTACT = String(process.env.ADMIN_USERNAME || DEFAULT_ADMIN_CONTACT).replace(/^@/, '').trim();
+const ENFORCE_WHITELIST = Boolean(ADMIN_ID);
+
+// Which roster this process serves. The multi-restaurant Le Garage bot lets
+// users switch which recipes they see, but its *staff list* is le_garage.
+const ACCESS_SCOPE = SINGLE_MODE ? FIXED_RESTAURANT : 'le_garage';
+
 function isAdmin(userId) {
-  const id = process.env.ADMIN_USER_ID;
-  return id && String(userId) === String(id);
+  return Boolean(ADMIN_ID) && String(userId) === ADMIN_ID;
+}
+function isAllowed(userId) {
+  if (!ENFORCE_WHITELIST) return true;
+  if (isAdmin(userId)) return true; // the admin can never lock themselves out
+  return access.isAllowed(userId, ACCESS_SCOPE);
+}
+
+// Shown to everyone who isn't on the list. The id is in a <code> block so a
+// tap copies it — the whole flow is "employee sends the manager this number,
+// manager runs /adduser".
+function denialMessage(userId) {
+  return '🚫 <b>Access closed</b>\n\n' +
+    'This bot is for authorized staff only.\n\n' +
+    'Your Telegram ID:\n' +
+    `🆔 <code>${userId}</code>\n\n` +
+    `To request access, send this ID to @${ADMIN_CONTACT}.`;
+}
+
+async function denyText(ctx, where) {
+  const u = ctx.from;
+  // Logged so `pm2 logs` doubles as the roster to add from — the Boho bot
+  // has no prior record of who its users are.
+  console.log(`   🚫 Blocked (${where}) @${u.username || '-'} ${u.first_name || ''} (${u.id})`);
+  await ctx.reply(denialMessage(u.id), { parse_mode: 'HTML' });
+}
+
+// One-time migration. ALLOWED_USER_IDS used to be the entire whitelist; if it
+// is still set on a box and this scope has no roster yet, seed the file from
+// it so an existing config isn't silently dropped. After that the file is the
+// only source of truth — /deluser has to be able to revoke anyone, and it
+// cannot delete a line out of .env.
+const legacyIds = String(process.env.ALLOWED_USER_IDS || '')
+  .split(',').map((s) => s.trim()).filter((s) => /^\d+$/.test(s));
+if (ENFORCE_WHITELIST && legacyIds.length > 0 && access.count(ACCESS_SCOPE) === 0) {
+  const seeded = access.importUsers(legacyIds.map((userId) => ({ userId })), ACCESS_SCOPE, 'ALLOWED_USER_IDS');
+  console.log(`[ACCESS] seeded ${seeded.length} user(s) into "${ACCESS_SCOPE}" from legacy ALLOWED_USER_IDS`);
 }
 function esc(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -131,6 +183,7 @@ function restaurantKeyboard() {
 }
 
 bot.start(async (ctx) => {
+  if (!isAllowed(ctx.from.id)) { await denyText(ctx, '/start'); return; }
   if (SINGLE_MODE) {
     const label = FIXED_RESTAURANT === 'le_garage' ? '🍔 Le Garage' : '☕ Boho Cafe';
     await ctx.reply(
@@ -156,6 +209,7 @@ bot.start(async (ctx) => {
 });
 
 bot.command('restaurant', async (ctx) => {
+  if (!isAllowed(ctx.from.id)) { await denyText(ctx, '/restaurant'); return; }
   if (SINGLE_MODE) {
     const label = FIXED_RESTAURANT === 'le_garage' ? '🍔 Le Garage' : '☕ Boho Cafe';
     await ctx.reply(
@@ -176,6 +230,7 @@ bot.command('restaurant', async (ctx) => {
 });
 
 bot.action(/^select_(le_garage|boho)$/, async (ctx) => {
+  if (!isAllowed(ctx.from.id)) { await ctx.answerCbQuery('🚫 Access closed'); return; }
   if (SINGLE_MODE) { await ctx.answerCbQuery('Single-restaurant bot'); return; }
   const restaurant = ctx.match[1];
   const userId = ctx.from.id;
@@ -223,30 +278,185 @@ bot.action(/^r_([0-9a-f]{32})$/, async (ctx) => {
 });
 
 bot.help(async (ctx) => {
-  await ctx.reply(
+  if (!isAllowed(ctx.from.id)) { await denyText(ctx, '/help'); return; }
+  let text =
     '📖 <b>How to use</b>\n\n' +
     'Just type the dish name — no commands needed.\nTypos are OK; the bot will try to figure it out.\n\n' +
     '<b>Languages:</b> 🇬🇧 English · 🇪🇬 العربية\n\n' +
     '<b>Commands:</b>\n' +
     '<code>/restaurant</code> — switch restaurant\n' +
-    '<code>/broken</code> — admin: list recipes that need fixing in Notion',
-    { parse_mode: 'HTML' },
-  );
+    '<code>/whoami</code> — show your Telegram id';
+  if (isAdmin(ctx.from.id)) {
+    text +=
+      '\n\n<b>Admin — staff access:</b>\n' +
+      '<code>/users</code> — who has access\n' +
+      '<code>/adduser &lt;id&gt; &lt;name&gt;</code> — grant access\n' +
+      '<code>/deluser &lt;id | @user | name&gt;</code> — revoke, effective immediately\n' +
+      '<code>/import</code> — seed the list from past users (one-off)\n\n' +
+      '<b>Admin — recipes:</b>\n' +
+      '<code>/broken</code> · <code>/incomplete</code> · <code>/verify &lt;name&gt;</code>';
+  }
+  await ctx.reply(text, { parse_mode: 'HTML' });
 });
 
 bot.command('broken', async (ctx) => {
-  if (!isAllowed(ctx.from.id)) { await ctx.reply('🚫 Not authorized.'); return; }
+  if (!isAllowed(ctx.from.id)) { await denyText(ctx, 'report'); return; }
   const restaurant = getOrDefaultRestaurant(ctx.from.id);
   const recipes = getRestaurantRecipes(cache, restaurant);
   const messages = formatBrokenReport(recipes);
   for (const m of messages) await ctx.reply(m, { parse_mode: 'HTML', disable_web_page_preview: true });
 });
 bot.command('incomplete', async (ctx) => {
-  if (!isAllowed(ctx.from.id)) { await ctx.reply('🚫 Not authorized.'); return; }
+  if (!isAllowed(ctx.from.id)) { await denyText(ctx, 'report'); return; }
   const restaurant = getOrDefaultRestaurant(ctx.from.id);
   const recipes = getRestaurantRecipes(cache, restaurant);
   const messages = formatBrokenReport(recipes);
   for (const m of messages) await ctx.reply(m, { parse_mode: 'HTML', disable_web_page_preview: true });
+});
+
+// ── Staff roster (admin only) ────────────────────────────────────────────────
+// Every write lands in allowed-users.json, which both bot processes re-read on
+// change — so a grant or a revoke takes effect on the employee's next message
+// with no deploy and no restart.
+
+function scopeLabel() {
+  return ACCESS_SCOPE === 'boho' ? '☕ Boho Cafe' : '🍔 Le Garage';
+}
+
+function describeUser(u) {
+  const name = u.name ? esc(u.name) : '<i>(no name)</i>';
+  const handle = u.username ? ` @${esc(u.username)}` : '';
+  return `${name}${handle} — <code>${u.userId}</code>`;
+}
+
+function shortDate(iso) {
+  if (!iso) return 'never';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? 'never' : d.toISOString().slice(0, 10);
+}
+
+bot.command('adduser', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.reply('🚫 Admin only.'); return; }
+  const arg = ctx.message.text.replace(/^\/adduser(@\w+)?\s*/, '').trim();
+  const [rawId, ...nameParts] = arg.split(/\s+/);
+  if (!/^\d+$/.test(rawId || '')) {
+    await ctx.reply(
+      '📋 <b>Grant access</b>\n\n' +
+      '<code>/adduser &lt;telegram_id&gt; &lt;name&gt;</code>\n\n' +
+      'Example: <code>/adduser 583920144 Ahmed (kitchen)</code>\n\n' +
+      'The employee gets their id from this bot — it is shown in the ' +
+      '"access closed" message when they write to it.',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+  const entry = access.addUser(rawId, ACCESS_SCOPE, {
+    name: nameParts.join(' '),
+    addedBy: String(ctx.from.id),
+  });
+  await ctx.reply(
+    (entry.alreadyPresent ? '♻️ <b>Already had access</b> (details updated)\n\n' : '✅ <b>Access granted</b>\n\n') +
+    `${describeUser(entry)}\n${scopeLabel()} · ${access.count(ACCESS_SCOPE)} staff with access`,
+    { parse_mode: 'HTML' },
+  );
+});
+
+bot.command('deluser', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.reply('🚫 Admin only.'); return; }
+  const arg = ctx.message.text.replace(/^\/deluser(@\w+)?\s*/, '').trim();
+  if (!arg) {
+    await ctx.reply(
+      '📋 <b>Revoke access</b>\n\n' +
+      '<code>/deluser &lt;id | @username | name&gt;</code>\n\n' +
+      'Examples:\n<code>/deluser 583920144</code>\n<code>/deluser @ahmed_k</code>\n<code>/deluser Ahmed</code>\n\n' +
+      'Takes effect immediately — the next recipe they ask for is refused.',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  const matches = access.findUsers(arg, ACCESS_SCOPE);
+  if (matches.length === 0) {
+    await ctx.reply(`🔍 Nobody in the ${scopeLabel()} list matches <b>${esc(arg)}</b>.\nUse <code>/users</code> to see the roster.`, { parse_mode: 'HTML' });
+    return;
+  }
+  // Never guess which of several people to cut off — make the admin pick.
+  if (matches.length > 1) {
+    await ctx.reply(
+      `⚠️ <b>${matches.length} people match</b> "${esc(arg)}".\nRepeat with the exact id:\n\n` +
+      matches.map((u) => `• ${describeUser(u)}`).join('\n'),
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  const removed = access.removeUser(matches[0].userId, ACCESS_SCOPE);
+  await ctx.reply(
+    `🗑 <b>Access revoked</b>\n\n${describeUser(removed)}\n` +
+    `${scopeLabel()} · ${access.count(ACCESS_SCOPE)} staff with access\n\n` +
+    '<i>They are blocked from their next message on. Recipes already sent stay in their chat history — Telegram does not let the bot take those back.</i>',
+    { parse_mode: 'HTML' },
+  );
+});
+
+bot.command('users', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.reply('🚫 Admin only.'); return; }
+  const users = access.listUsers(ACCESS_SCOPE);
+  if (!ENFORCE_WHITELIST) {
+    await ctx.reply('⚠️ <b>ADMIN_USER_ID is not set</b> — the whitelist is not enforced and the bot is open to everyone.', { parse_mode: 'HTML' });
+    return;
+  }
+  if (users.length === 0) {
+    await ctx.reply(
+      `👥 <b>${scopeLabel()}</b> — nobody has access yet.\n\n` +
+      'Add staff with <code>/adduser &lt;id&gt; &lt;name&gt;</code>, or run <code>/import</code> ' +
+      'to seed the list from everyone who has used this bot before.',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+  const lines = users.map((u) => `• ${describeUser(u)}\n  added ${shortDate(u.added_at)} · last seen ${shortDate(u.last_seen)}`);
+  // Telegram caps a message at 4096 chars; a long roster goes out in chunks.
+  const header = `👥 <b>${scopeLabel()}</b> — ${users.length} with access\n\n`;
+  let buf = header;
+  for (const line of lines) {
+    if (buf.length + line.length > 3500) { await ctx.reply(buf, { parse_mode: 'HTML' }); buf = ''; }
+    buf += line + '\n';
+  }
+  if (buf.trim()) await ctx.reply(buf, { parse_mode: 'HTML' });
+});
+
+bot.command('import', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.reply('🚫 Admin only.'); return; }
+  // One-shot bootstrap for the switch from open access to a whitelist:
+  // user-preferences.json already holds everyone who ever used the bot, so
+  // this keeps the kitchen working and leaves the admin to prune with
+  // /deluser rather than re-adding every cook by hand.
+  const candidates = listPrefUsers()
+    .filter((u) => u.restaurant === ACCESS_SCOPE)
+    .map((u) => ({ userId: u.userId, last_active: u.last_active }));
+
+  if (candidates.length === 0) {
+    await ctx.reply(
+      `📭 No previous ${scopeLabel()} users on record.\n\n` +
+      'Add staff with <code>/adduser &lt;id&gt; &lt;name&gt;</code> — each person gets their id ' +
+      'from the "access closed" message when they write to this bot.',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+  const added = access.importUsers(candidates, ACCESS_SCOPE, String(ctx.from.id));
+  await ctx.reply(
+    `📥 <b>Imported ${added.length}</b> of ${candidates.length} previous ${scopeLabel()} users.\n` +
+    `Total with access: ${access.count(ACCESS_SCOPE)}\n\n` +
+    '⚠️ Access was open before, so this list can include people who are not staff.\n' +
+    'Review it with <code>/users</code> and cut anyone who should not be there with <code>/deluser</code>.',
+    { parse_mode: 'HTML' },
+  );
+});
+
+bot.command('whoami', async (ctx) => {
+  await ctx.reply(`🆔 <code>${ctx.from.id}</code>`, { parse_mode: 'HTML' });
 });
 
 bot.command('verify', async (ctx) => {
@@ -319,11 +529,8 @@ bot.on('text', async (ctx) => {
     await ctx.reply('🔧 Under maintenance. Please try again in a few minutes.\n🔧 صيانة. يرجى المحاولة بعد دقائق.');
     return;
   }
-  if (!isAllowed(userId)) {
-    console.log('   🚫 Blocked (not in whitelist)');
-    await ctx.reply('🚫 Not authorized.');
-    return;
-  }
+  if (!isAllowed(userId)) { await denyText(ctx, 'search'); return; }
+  access.touch(userId, ACCESS_SCOPE, ctx.from.username);
 
   // Single-restaurant bots skip user-preference lookup entirely and
   // serve everyone from the fixed slot. In multi mode, existing users
@@ -482,7 +689,11 @@ bot.telegram.getMe().then(async (info) => {
   const { lgd, bhd } = drinkCounts();
   console.log(`\n✅ Bot is running on @${info.username}`);
   console.log(`   Cache: ${lg} le_garage (+${lgd} drinks) + ${bh} boho (+${bhd} drinks)`);
-  console.log(`   Whitelist: ${allowedIds.length === 0 ? 'open' : allowedIds.length + ' users'}\n`);
+  if (ENFORCE_WHITELIST) {
+    console.log(`   Whitelist: ENFORCED · ${access.count(ACCESS_SCOPE)} staff in "${ACCESS_SCOPE}" + admin ${ADMIN_ID}\n`);
+  } else {
+    console.log('   ⚠️  Whitelist: OPEN TO EVERYONE — set ADMIN_USER_ID in the env file to enforce it\n');
+  }
   startupVerificationSample().catch(() => {});
 }).catch((err) => {
   console.error('💥 Failed to connect to Telegram:', err.message);
