@@ -161,7 +161,19 @@ Touch `/tmp/maintenance.flag` to pause the bot for users (it replies "🔧 Under
 
 ### Auto-deploy (cron)
 
-`/opt/autodeploy.sh` runs every 5 minutes from `crontab`: it git-pulls, `pm2 restart`s, and skips entirely while `/tmp/maintenance.flag` exists. Disable by commenting the line in `crontab -l`.
+`/opt/autodeploy.sh` runs every 5 minutes from root's `crontab`: it git-pulls
+and, only when the commit changed, runs
+`pm2 startOrReload ecosystem.config.js --update-env`. It skips entirely while
+`/tmp/maintenance.flag` exists. Disable by commenting the line in `crontab -l`.
+
+It used to run `pm2 restart recipe-bot` — a single process — so `recipe-bot-boho`
+and `recipe-sync` silently kept running whatever code they had started with.
+The Boho bot was found nearly 10 days behind master. If you edit this script,
+keep it reloading the **ecosystem file**, never one app by name.
+
+`.github/workflows/deploy.yml` is **not** how this deploys. The repo has no
+Actions secrets, so that workflow has failed on `missing server host` since it
+was added; the cron above is the real path.
 
 ### Weekly cache rebuild
 
