@@ -52,13 +52,13 @@ console.log(`🏪 Restaurant mode: ${MODE}`);
 // allowed-users.json — no SSH, no PM2 restart, and a revoked employee stops
 // getting recipes on their very next message. See lib/access.js.
 //
-// Enforcement hangs off ADMIN_USER_ID: without an admin nobody could run
-// /adduser, so an empty whitelist would be an unrecoverable lockout fixable
-// only over SSH. In that case we shout in the log and stay open rather than
-// brick a working bot.
-// Baked in rather than left to the env so a plain `git push` closes the bot on
-// both processes — .env and .env.boho live only on the VPS and would each need
-// editing by hand. ADMIN_USER_ID still overrides it.
+// Nobody is ever grandfathered in: the roster starts empty and the ONLY way
+// onto it is the admin running /adduser. Length of service in the old open
+// bot counts for nothing — see the removed ALLOWED_USER_IDS migration.
+//
+// The admin id is baked in rather than left to the env so a plain `git push`
+// closes both processes — .env and .env.boho live only on the VPS and would
+// each need editing by hand. ADMIN_USER_ID still overrides it.
 const DEFAULT_ADMIN_ID = '923918835';        // @Anton_chevzhyk
 const DEFAULT_ADMIN_CONTACT = 'Anton_chevzhyk';
 
@@ -98,17 +98,20 @@ async function denyText(ctx, where) {
   await ctx.reply(denialMessage(u.id), { parse_mode: 'HTML' });
 }
 
-// One-time migration. ALLOWED_USER_IDS used to be the entire whitelist; if it
-// is still set on a box and this scope has no roster yet, seed the file from
-// it so an existing config isn't silently dropped. After that the file is the
-// only source of truth — /deluser has to be able to revoke anyone, and it
-// cannot delete a line out of .env.
-const legacyIds = String(process.env.ALLOWED_USER_IDS || '')
-  .split(',').map((s) => s.trim()).filter((s) => /^\d+$/.test(s));
-if (ENFORCE_WHITELIST && legacyIds.length > 0 && access.count(ACCESS_SCOPE) === 0) {
-  const seeded = access.importUsers(legacyIds.map((userId) => ({ userId })), ACCESS_SCOPE, 'ALLOWED_USER_IDS');
-  console.log(`[ACCESS] seeded ${seeded.length} user(s) into "${ACCESS_SCOPE}" from legacy ALLOWED_USER_IDS`);
+// ALLOWED_USER_IDS is dead. It is deliberately NOT imported: whatever is left
+// in it on the VPS would silently hand access back to exactly the people who
+// are supposed to ask for it. If it is still set, say so and ignore it.
+if (String(process.env.ALLOWED_USER_IDS || '').trim()) {
+  console.log('[ACCESS] ALLOWED_USER_IDS is set but IGNORED — the roster is allowed-users.json only');
 }
+
+// Printed at load, before any network call, so `pm2 logs` proves which build
+// is live and whether the roster is really empty.
+console.log(
+  `[ACCESS] v${require('./package.json').version} · scope="${ACCESS_SCOPE}" · ` +
+  `${access.count(ACCESS_SCOPE)} on the roster · admin ${ADMIN_ID} (@${ADMIN_CONTACT}) · ` +
+  `${ENFORCE_WHITELIST ? 'ENFORCED' : 'OPEN'}`,
+);
 function esc(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

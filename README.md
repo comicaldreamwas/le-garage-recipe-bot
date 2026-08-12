@@ -27,7 +27,7 @@ node bot.js
 | `NOTION_TOKEN` | ✅ | Notion integration token (`ntn_...`) |
 | `NOTION_PARENT_EL_GOUNA` | optional | El Gouna database ID (default baked in) |
 | `NOTION_PARENT_CAIRO` | optional | Cairo database ID (default baked in) |
-| `ALLOWED_USER_IDS` | deprecated | Old whitelist. Imported into `allowed-users.json` once at startup, then ignored — see [Staff access](#staff-access) |
+| `ALLOWED_USER_IDS` | dead | The old whitelist. Ignored entirely — never imported, so nobody is grandfathered in. See [Staff access](#staff-access) |
 | `ADMIN_USER_ID` | optional | Receives drift alerts, unlocks `/verify`, and manages the staff whitelist. Defaults to the owner id in `bot.js` — set only to hand the bot to a different admin |
 | `ADMIN_USERNAME` | optional | Handle shown to blocked users. Defaults to the owner handle in `bot.js` |
 
